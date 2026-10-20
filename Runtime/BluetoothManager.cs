@@ -141,8 +141,36 @@ namespace UnityNativeBLE
             {
                 Debug.LogWarning($"[Native BLE] Android JNI initialization attempt: {ex.Message}");
             }
+#elif (UNITY_OPENHARMONY || UNITY_OHOS) && !UNITY_EDITOR
+            try
+            {
+                NativeBLE.BLEInitOHOS(IntPtr.Zero, IntPtr.Zero);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[Native BLE] OpenHarmony initialization attempt: {ex.Message}");
+            }
 #endif
 
+            int res = NativeBLE.BLEInit();
+            _isInitialized = (res == 0);
+            return _isInitialized;
+        }
+
+        /// <summary>
+        /// Initialize the BLE native subsystem for OpenHarmony with explicit N-API env and context pointers.
+        /// </summary>
+        public bool InitializeOHOS(IntPtr env, IntPtr abilityContext)
+        {
+            if (_isInitialized) return true;
+            try
+            {
+                NativeBLE.BLEInitOHOS(env, abilityContext);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[Native BLE] OpenHarmony explicit initialization attempt: {ex.Message}");
+            }
             int res = NativeBLE.BLEInit();
             _isInitialized = (res == 0);
             return _isInitialized;

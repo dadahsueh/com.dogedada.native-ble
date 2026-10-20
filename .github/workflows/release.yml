@@ -1,10 +1,12 @@
 name: Release & UPM Branch
 
 on:
-  push:
-    tags:
-      - 'v*.*.*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version tag to release (e.g. v0.3.0)'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -159,11 +161,36 @@ jobs:
           path: Runtime/Plugins/Android/
 
   # -------------------------------------------------------------
-  # 5. Assemble Plugins, Deploy UPM Branch, & Publish Release
+  # 5. Build OpenHarmony (Static Libraries)
+  # -------------------------------------------------------------
+  build-ohos:
+    name: Build (OpenHarmony)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-ohos, armv7-unknown-linux-ohos
+
+      - name: Build OpenHarmony Libraries
+        run: |
+          python3 build.py --target ohos-arm64
+          python3 build.py --target ohos-arm
+
+      - name: Upload OpenHarmony Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ohos-plugins
+          path: Runtime/Plugins/OpenHarmony/
+
+  # -------------------------------------------------------------
+  # 6. Assemble Plugins, Deploy UPM Branch, & Publish Release
   # -------------------------------------------------------------
   deploy-upm:
     name: Deploy UPM Branch & Release
-    needs: [build-apple, build-windows, build-linux, build-android]
+    needs: [build-apple, build-windows, build-linux, build-android, build-ohos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -195,6 +222,12 @@ jobs:
           name: android-plugins
           path: Runtime/Plugins/Android/
 
+      - name: Download OpenHarmony Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ohos-plugins
+          path: Runtime/Plugins/OpenHarmony/
+
       - name: Verify Staged Plugins
         run: |
           echo "=== Plugins Directory Tree ==="
@@ -215,7 +248,7 @@ jobs:
       # Package tarball for GitHub Release
       - name: Create Package Tarball
         run: |
-          VERSION="${GITHUB_REF_NAME:-0.1.0}"
+          VERSION="${{ github.event.inputs.tag || github.ref_name || 'latest' }}"
           tar -czvf "com.dogedada.native-ble-${VERSION}.tgz" -C ../upm-staging .
 
       # Push to orphan UPM branch
@@ -230,21 +263,22 @@ jobs:
           git rm -rf .
           cp -r ../upm-staging/* .
           git add -A
-          git commit -m "chore: release package ${GITHUB_REF_NAME:-latest} [skip ci]"
+          RELEASE_TAG="${{ github.event.inputs.tag || github.ref_name || 'latest' }}"
+          git commit -m "chore: release package ${RELEASE_TAG} [skip ci]"
           git push origin upm --force
 
-          if [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+ ]]; then
-            git tag -f "${GITHUB_REF_NAME}"
-            git push origin "${GITHUB_REF_NAME}" --force
+          if [[ "${RELEASE_TAG}" =~ ^v[0-9]+ ]]; then
+            git tag -f "${RELEASE_TAG}"
+            git push origin "${RELEASE_TAG}" --force
           fi
 
-      # Create GitHub Release if triggered by tag
+      # Create GitHub Release if triggered by tag or version input
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event.inputs.tag != '' && startsWith(github.event.inputs.tag, 'v'))
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="${GITHUB_REF_NAME}"
+          VERSION="${{ github.event.inputs.tag || github.ref_name }}"
           gh release create "${VERSION}" \
             "com.dogedada.native-ble-${VERSION}.tgz" \
             --title "${VERSION}" \

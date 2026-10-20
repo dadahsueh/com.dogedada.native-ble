@@ -85,6 +85,24 @@ PLATFORMS = {
         "requires_custom_setup": True,
         "optional": True,
     },
+    "ohos-arm64": {
+        "target": "aarch64-unknown-linux-ohos",
+        "output_dir": "Runtime/Plugins/OpenHarmony/arm64-v8a",
+        "output_name": "libunity_native_ble.a",
+        "type": "staticlib",
+        "rustup_target": "aarch64-unknown-linux-ohos",
+        "host_platforms": ["darwin", "linux", "windows"],
+        "optional": True,
+    },
+    "ohos-arm": {
+        "target": "armv7-unknown-linux-ohos",
+        "output_dir": "Runtime/Plugins/OpenHarmony/armeabi-v7a",
+        "output_name": "libunity_native_ble.a",
+        "type": "staticlib",
+        "rustup_target": "armv7-unknown-linux-ohos",
+        "host_platforms": ["darwin", "linux", "windows"],
+        "optional": True,
+    },
 }
 
 # Current platform detection
@@ -402,7 +420,7 @@ def build_platform(platform_key: str) -> bool:
                 src_file = output_path / "unity_native_ble.dll"
                 if not src_file.exists():
                     src_file = output_path / "libunity_native_ble.dll"
-            elif platform_key.startswith("android") or platform_key == "linux":
+            elif platform_key.startswith("android") or platform_key.startswith("ohos") or platform_key == "linux":
                 src_file = output_path / "libunity_native_ble.so"
             else:
                 src_file = output_path / config["output_name"]

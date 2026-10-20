@@ -17,7 +17,7 @@ Provides thread-safe, non-blocking BLE operations with a native event queue, JSO
 | **Windows** (10 / 11 64-bit) | Windows.Devices.Bluetooth (WinRT) | **Supported** | `unity_native_ble.dll` | Requires Windows 10 (Build 15063+) or later. |
 | **Linux** (x86_64) | BlueZ (via D-Bus) | **Supported** | `libunity_native_ble.so` | Requires system `libdbus-1` and running `bluetoothd`. |
 | **Android** (arm64, armv7) | Android BluetoothGatt & LeAdvertiser | **Supported** | `libunity_native_ble.so` + `unity_native_ble_android.aar` | Central & Peripheral (GATT Server + Advertising). Clean-room JNI companion AAR with auto-initialization. Zero custom Java/Activity required. |
-| **OpenHarmony (OHOS)** | OHOS Native BLE C API | **Roadmap / Planned** | `libunity_native_ble.so` | Targets `aarch64-unknown-linux-ohos`. Requires OHOS NDK C binding. See [OpenHarmony Support](#openharmony-ohos-support). |
+| **OpenHarmony (OHOS)** | `ohos-rs` (`napi-ohos` + ArkTS `@ohos.bluetooth.ble`) | **Supported** | `libunity_native_ble.a` / `.so` | Targets `aarch64-unknown-linux-ohos`, `armv7-unknown-linux-ohos`. Full Central & Peripheral support via `ohos-rs`. |
 | **WebGL / Consoles** | N/A | **Not Supported** | N/A | Browser sandboxing and console OS restrictions block native BLE. |
 
 ### Key Architecture Highlights
@@ -30,36 +30,26 @@ Provides thread-safe, non-blocking BLE operations with a native event queue, JSO
 
 ---
 
-### Why Not SimpleBLE / SimpleRsBLE?
-
-While [SimpleBLE](https://github.com/simpleble/simpleble) / `simplersble` offers an established C++ BLE stack, it adopted the **Business Source License 1.1 (BUSL-1.1)**:
-- **Commercial Restrictions**: BUSL-1.1 forbids commercial and revenue-generating use without purchasing a commercial license from *The California Open Source Company LLC*.
-- **Copyleft Transition**: Releases convert to **GPL-3.0** after four years, which is incompatible with proprietary Unity games, console NDAs, and App Store distributions.
-- **OpenUPM Ineligible**: OpenUPM strictly requires OSI-approved open source licenses (such as MIT or Apache-2.0). BUSL-1.1 packages are rejected.
-
-By pairing **`btleplug`** (Central) with **`ble-peripheral-rust`** (Peripheral), this plugin remains **100% MIT / Apache-2.0**:
-- Completely free for commercial, indie, and proprietary Unity games with zero license fees.
-- 100% compliant with OpenUPM and Unity Package Manager standards.
-- Pure Rust cross-compilation without heavy CMake / C++ toolchain dependencies.
-
----
-
 ### OpenHarmony (OHOS) Support
 
-OpenHarmony / HarmonyOS NEXT does **not** use BlueZ or Android's Java BLE stack. Instead, OpenHarmony provides its own native subsystem (`communication_bluetooth`) and Native C APIs in the OpenHarmony NDK.
+OpenHarmony / HarmonyOS NEXT does **not** use BlueZ or Android's Java BLE stack. Instead, OpenHarmony manages Bluetooth LE through its ArkTS bluetooth subsystem (`@ohos.bluetooth.access` and `@ohos.bluetooth.ble`).
 
-#### How to Add OHOS Support:
-1. **Rust Toolchain**: Use the official Rust target for OpenHarmony:
-   ```bash
-   rustup target add aarch64-unknown-linux-ohos
-   rustup target add armv7-unknown-linux-ohos
-   ```
-2. **Native C API Binding**: OpenHarmony provides native BLE APIs in the OHOS NDK (`#include <bluetooth/bluetooth_ble.h>`). Since `btleplug` lacks an OHOS backend, we bind to OpenHarmony's native C BLE APIs directly via an OHOS platform module in Rust or through Unity's OpenHarmony NAPI bridge.
-3. **Compilation**: Compile using the OpenHarmony NDK LLVM toolchain:
-   ```bash
-   cargo build --target aarch64-unknown-linux-ohos --release
-   ```
-4. **Unity Placement**: Place the compiled `libunity_native_ble.so` into `Runtime/Plugins/OpenHarmony/arm64-v8a/`.
+#### Architecture:
+1. **Rust Backend via `ohos-rs`**: Uses `napi-ohos` to link with the OpenHarmony N-API runtime without needing D-Bus or Android JVM.
+2. **Targets**: Supports both `aarch64-unknown-linux-ohos` (64-bit devices) and `armv7-unknown-linux-ohos` (32-bit devices).
+3. **Central & Peripheral Modes**: Supports BLE scanning, connection, service discovery, read/write, notifications, and GATT peripheral advertising with custom services.
+4. **Unity Integration**: In Unity for OpenHarmony, `BluetoothManager.Instance.Initialize()` automatically initializes the OHOS BLE backend. Optional explicit N-API environment initialization is available via `BluetoothManager.Instance.InitializeOHOS(env, abilityContext)`.
+
+#### Building for OpenHarmony:
+```bash
+# Add targets
+rustup target add aarch64-unknown-linux-ohos
+rustup target add armv7-unknown-linux-ohos
+
+# Build static library via build script
+python3 build.py --target ohos-arm64
+python3 build.py --target ohos-arm
+```
 
 ---
 
@@ -72,7 +62,7 @@ In Unity: **Window > Package Manager > `+` > Add package from git URL...**:
 ```
 https://github.com/dadahsueh/com.dogedada.native-ble.git#upm
 ```
-*(Or pin to a specific release tag such as `#v0.1.0`)*
+*(Or pin to a specific release tag such as `#v0.2.0`)*
 
 Or add directly to `Packages/manifest.json`:
 
@@ -106,7 +96,7 @@ Or add the scoped registry to `Packages/manifest.json`:
     }
   ],
   "dependencies": {
-    "com.dogedada.native-ble": "0.1.0"
+    "com.dogedada.native-ble": "0.2.0"
   }
 }
 ```
@@ -350,13 +340,29 @@ int BLEPollEventJson(uint8_t* out_buffer, uint32_t max_len);
 
 ## Roadmap
 
-- [ ] **OpenHarmony (OHOS) Support**
-  - Implement native C BLE bindings for OHOS NDK (`#include <bluetooth/bluetooth_ble.h>`).
-  - Add build support for targets `aarch64-unknown-linux-ohos` and `armv7-unknown-linux-ohos`.
-  - Package binary to `Runtime/Plugins/OpenHarmony/arm64-v8a/libunity_native_ble.so`.
+- [x] **OpenHarmony (OHOS) Support**
+  - Integrated `ohos-rs` (`napi-ohos` + ArkTS `@ohos.bluetooth.ble`).
+  - Added cross-compilation support for `aarch64-unknown-linux-ohos` and `armv7-unknown-linux-ohos`.
+  - Added `BLEInitOHOS` and automatic OpenHarmony initialization in `BluetoothManager`.
 - [ ] **Extended GATT Capabilities**
-  - Add support for MTU size negotiation request.
-  - Add support for RSSI periodic read on connected peripherals.
+  - **MTU Size Negotiation**: Client-requested MTU adjustment (`BLERequestMtu`). *(Standard communication currently uses default 23-byte MTU or OS auto-negotiation; explicit manual MTU control is planned via platform GATT hooks)*.
+  - **Connected RSSI Polling**: Live RSSI polling on connected peripherals (`BLEReadRssi`). *(Initial RSSI is captured during scan discovery; periodic connected polling is planned)*.
+
+---
+
+## Architecture Decisions & Notes
+
+### Why Not SimpleBLE / SimpleRsBLE?
+
+While [SimpleBLE](https://github.com/simpleble/simpleble) / `simplersble` offers an established C++ BLE stack, it adopted the **Business Source License 1.1 (BUSL-1.1)**:
+- **Commercial Restrictions**: BUSL-1.1 forbids commercial and revenue-generating use without purchasing a commercial license from *The California Open Source Company LLC*.
+- **Copyleft Transition**: Releases convert to **GPL-3.0** after four years, which is incompatible with proprietary Unity games, console NDAs, and App Store distributions.
+- **OpenUPM Ineligible**: OpenUPM strictly requires OSI-approved open source licenses (such as MIT or Apache-2.0). BUSL-1.1 packages are rejected.
+
+By pairing **`btleplug`** (Central) with **`ble-peripheral-rust`** (Peripheral) and native platform bridges (clean-room Android companion AAR, OpenHarmony `ohos-rs`), this plugin remains **100% MIT / Apache-2.0**:
+- Completely free for commercial, indie, and proprietary Unity games with zero license fees.
+- 100% compliant with OpenUPM and Unity Package Manager standards.
+- Pure Rust cross-compilation without heavy CMake / C++ toolchain dependencies.
 
 ---
 

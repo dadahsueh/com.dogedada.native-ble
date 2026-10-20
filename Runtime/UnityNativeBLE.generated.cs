@@ -143,6 +143,13 @@ namespace UnityNativeBLE
         [DllImport(NativeLib, CallingConvention = CallingConvention.Cdecl, EntryPoint = "BLEInitAndroid")]
         public static extern int BLEInitAndroid(IntPtr jvm, IntPtr activity);
 
+        /// Initialize BLE subsystem for OpenHarmony
+        ///
+        /// # Safety
+        /// `env` and `ability_context` must be valid OpenHarmony N-API environment and context pointers if provided.
+        [DllImport(NativeLib, CallingConvention = CallingConvention.Cdecl, EntryPoint = "BLEInitOHOS")]
+        public static extern int BLEInitOHOS(IntPtr env, IntPtr ability_context);
+
         /// Start advertising as a BLE peripheral
         ///
         /// # Safety

@@ -67,3 +67,24 @@ jobs:
 
       - name: Test
         run: cargo test --all-targets --verbose
+
+  check-ohos:
+    name: Check (OpenHarmony)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-ohos, armv7-unknown-linux-ohos
+          components: clippy
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check aarch64-unknown-linux-ohos
+        run: cargo clippy --target aarch64-unknown-linux-ohos -- -D warnings
+
+      - name: Check armv7-unknown-linux-ohos
+        run: cargo clippy --target armv7-unknown-linux-ohos -- -D warnings

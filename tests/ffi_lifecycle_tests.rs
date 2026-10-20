@@ -1,6 +1,6 @@
 use unity_native_ble::{
     BLECleanup, BLEGetAdapterCount, BLEGetDiscoveredDevicesCount,
-    BLEGetDiscoveredDevicesJson, BLEInit, BLEInitAndroid, BLEPeripheralAddCharacteristic,
+    BLEGetDiscoveredDevicesJson, BLEInit, BLEInitAndroid, BLEInitOHOS, BLEPeripheralAddCharacteristic,
     BLEPeripheralAddService, BLEPeripheralIsAdvertising, BLEPeripheralStopAdvertising,
     BLEPeripheralUpdateCharacteristic, BLEPollEventJson, BLEUuid, TestLogging,
     EVENT_QUEUE, BleEvent,
@@ -67,6 +67,10 @@ fn test_peripheral_and_android_ffi() {
     // Android helper is safe on all platforms
     let android_res = unsafe { BLEInitAndroid(std::ptr::null_mut(), std::ptr::null_mut()) };
     assert_eq!(android_res, 0);
+
+    // OpenHarmony helper is safe on all platforms
+    let ohos_res = unsafe { BLEInitOHOS(std::ptr::null_mut(), std::ptr::null_mut()) };
+    assert_eq!(ohos_res, 0);
 
     // Initial peripheral state
     assert_eq!(BLEPeripheralIsAdvertising(), 0);

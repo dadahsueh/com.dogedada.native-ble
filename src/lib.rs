@@ -1,6 +1,8 @@
+#[cfg(not(target_env = "ohos"))]
 use btleplug::api::{Central, CentralEvent, CharPropFlags, Manager as _, Peripheral, ScanFilter};
-#[cfg(not(target_os = "android"))]
+#[cfg(all(not(target_os = "android"), not(target_env = "ohos")))]
 use ble_peripheral_rust::PeripheralImpl;
+#[cfg(not(target_env = "ohos"))]
 use futures::StreamExt;
 use interoptopus::{ffi_function, ffi_type};
 use serde::{Deserialize, Serialize};
@@ -9,6 +11,7 @@ use std::ffi::{c_char, CStr, CString};
 use std::panic::catch_unwind;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{LazyLock, Mutex};
+#[cfg(not(target_env = "ohos"))]
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -82,21 +85,24 @@ pub fn log_message(log_type: UnityLogType, message: &str, file: &str, line: u32)
 
 macro_rules! unity_log {
     ($($arg:tt)*) => {
-        log_message(UnityLogType::Log, &format!($($arg)*), file!(), line!());
+        $crate::log_message($crate::UnityLogType::Log, &format!($($arg)*), file!(), line!());
     };
 }
 
 macro_rules! unity_log_warning {
     ($($arg:tt)*) => {
-        log_message(UnityLogType::Warning, &format!($($arg)*), file!(), line!());
+        $crate::log_message($crate::UnityLogType::Warning, &format!($($arg)*), file!(), line!());
     };
 }
 
 macro_rules! unity_log_error {
     ($($arg:tt)*) => {
-        log_message(UnityLogType::Error, &format!($($arg)*), file!(), line!());
+        $crate::log_message($crate::UnityLogType::Error, &format!($($arg)*), file!(), line!());
     };
 }
+
+#[cfg(target_env = "ohos")]
+pub mod ohos;
 
 // ===== Unity Plugin Load/Unload =====
 
@@ -322,15 +328,19 @@ pub struct GattServiceInfo {
 
 pub static EVENT_QUEUE: LazyLock<BleEventQueue> = LazyLock::new(|| BleEventQueue::new(512));
 
+#[cfg(not(target_env = "ohos"))]
 static BLE_MANAGER: Mutex<Option<btleplug::platform::Manager>> = Mutex::new(None);
+#[cfg(not(target_env = "ohos"))]
 static BLE_ADAPTERS: Mutex<Vec<btleplug::platform::Adapter>> = Mutex::new(Vec::new());
 static TOKIO_RUNTIME: Mutex<Option<tokio::runtime::Runtime>> = Mutex::new(None);
 
 pub static DISCOVERED_DEVICES: LazyLock<Mutex<HashMap<String, DiscoveredDeviceInfo>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+#[cfg(not(target_env = "ohos"))]
 pub static DISCOVERED_PERIPHERALS: LazyLock<
     Mutex<HashMap<String, btleplug::platform::Peripheral>>,
 > = LazyLock::new(|| Mutex::new(HashMap::new()));
+#[cfg(not(target_env = "ohos"))]
 pub static CONNECTED_PERIPHERALS: LazyLock<
     Mutex<HashMap<String, btleplug::platform::Peripheral>>,
 > = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -338,9 +348,9 @@ static NOTIFICATION_TASKS: LazyLock<Mutex<HashMap<String, tokio::task::JoinHandl
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static SCAN_TASKS: Mutex<Vec<tokio::task::JoinHandle<()>>> = Mutex::new(Vec::new());
 
-#[cfg(not(target_os = "android"))]
+#[cfg(all(not(target_os = "android"), not(target_env = "ohos")))]
 static PERIPHERAL_INSTANCE: Mutex<Option<ble_peripheral_rust::Peripheral>> = Mutex::new(None);
-#[cfg(not(target_os = "android"))]
+#[cfg(all(not(target_os = "android"), not(target_env = "ohos")))]
 static PERIPHERAL_SERVICES: Mutex<Vec<ble_peripheral_rust::gatt::service::Service>> =
     Mutex::new(Vec::new());
 static PERIPHERAL_ADVERTISING: std::sync::atomic::AtomicBool =
@@ -353,6 +363,7 @@ static ANDROID_JVM: Mutex<Option<jni::JavaVM>> = Mutex::new(None);
 
 // ===== BLE Internal Helpers =====
 
+#[cfg(not(target_env = "ohos"))]
 fn get_peripheral_id_string<P: Peripheral>(peripheral: &P) -> String {
     let id_str = peripheral.id().to_string();
     if id_str.is_empty() || id_str == "00:00:00:00:00:00" {
@@ -380,28 +391,38 @@ pub extern "C" fn BLEInit() -> i32 {
             }
         };
 
-        let manager = match rt.block_on(async { btleplug::platform::Manager::new().await }) {
-            Ok(mgr) => mgr,
-            Err(e) => {
-                unity_log_error!("Failed to create BLE manager: {:?}", e);
-                return -1;
-            }
-        };
+        #[cfg(target_env = "ohos")]
+        {
+            unity_log!("OpenHarmony BLE subsystem initialized successfully");
+            *TOKIO_RUNTIME.lock().unwrap() = Some(rt);
+            0
+        }
 
-        let adapters = match rt.block_on(async { manager.adapters().await }) {
-            Ok(adapter_list) => adapter_list,
-            Err(e) => {
-                unity_log_error!("Failed to get adapters: {:?}", e);
-                return -1;
-            }
-        };
+        #[cfg(not(target_env = "ohos"))]
+        {
+            let manager = match rt.block_on(async { btleplug::platform::Manager::new().await }) {
+                Ok(mgr) => mgr,
+                Err(e) => {
+                    unity_log_error!("Failed to create BLE manager: {:?}", e);
+                    return -1;
+                }
+            };
 
-        unity_log!("Found {} BLE adapter(s)", adapters.len());
-        *BLE_MANAGER.lock().unwrap() = Some(manager);
-        *BLE_ADAPTERS.lock().unwrap() = adapters;
-        *TOKIO_RUNTIME.lock().unwrap() = Some(rt);
+            let adapters = match rt.block_on(async { manager.adapters().await }) {
+                Ok(adapter_list) => adapter_list,
+                Err(e) => {
+                    unity_log_error!("Failed to get adapters: {:?}", e);
+                    return -1;
+                }
+            };
 
-        0
+            unity_log!("Found {} BLE adapter(s)", adapters.len());
+            *BLE_MANAGER.lock().unwrap() = Some(manager);
+            *BLE_ADAPTERS.lock().unwrap() = adapters;
+            *TOKIO_RUNTIME.lock().unwrap() = Some(rt);
+
+            0
+        }
     })
     .unwrap_or(-1)
 }
@@ -431,6 +452,7 @@ pub extern "C" fn BLECleanup() -> i32 {
         }
 
         // Disconnect connected peripherals
+        #[cfg(not(target_env = "ohos"))]
         let peripherals_to_disconnect: Vec<btleplug::platform::Peripheral> = {
             let mut peripherals = CONNECTED_PERIPHERALS.lock().unwrap();
             peripherals.drain().map(|(_, p)| p).collect()
@@ -438,6 +460,7 @@ pub extern "C" fn BLECleanup() -> i32 {
 
         let rt_opt = TOKIO_RUNTIME.lock().unwrap().take();
         if let Some(rt) = rt_opt {
+            #[cfg(not(target_env = "ohos"))]
             for peripheral in peripherals_to_disconnect {
                 rt.block_on(async {
                     let _ = peripheral.disconnect().await;
@@ -446,13 +469,17 @@ pub extern "C" fn BLECleanup() -> i32 {
             drop(rt);
         }
 
+        #[cfg(not(target_env = "ohos"))]
         DISCOVERED_PERIPHERALS.lock().unwrap().clear();
         DISCOVERED_DEVICES.lock().unwrap().clear();
         EVENT_QUEUE.clear();
-        *BLE_MANAGER.lock().unwrap() = None;
-        BLE_ADAPTERS.lock().unwrap().clear();
+        #[cfg(not(target_env = "ohos"))]
+        {
+            *BLE_MANAGER.lock().unwrap() = None;
+            BLE_ADAPTERS.lock().unwrap().clear();
+        }
 
-        #[cfg(not(target_os = "android"))]
+        #[cfg(all(not(target_os = "android"), not(target_env = "ohos")))]
         {
             PERIPHERAL_ADVERTISING.store(false, Ordering::SeqCst);
             *PERIPHERAL_INSTANCE.lock().unwrap() = None;
@@ -470,7 +497,14 @@ pub extern "C" fn BLECleanup() -> i32 {
 #[no_mangle]
 #[allow(non_snake_case)]
 pub extern "C" fn BLEGetAdapterCount() -> i32 {
-    catch_unwind(|| BLE_ADAPTERS.lock().unwrap().len() as i32).unwrap_or(-1)
+    #[cfg(target_env = "ohos")]
+    {
+        1
+    }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        catch_unwind(|| BLE_ADAPTERS.lock().unwrap().len() as i32).unwrap_or(-1)
+    }
 }
 
 /// Start scanning for BLE peripherals across all adapters
@@ -481,93 +515,101 @@ pub extern "C" fn BLEStartScan() -> i32 {
     catch_unwind(|| {
         unity_log!("Starting BLE scan...");
 
-        let rt_guard = TOKIO_RUNTIME.lock().unwrap();
-        let rt = match rt_guard.as_ref() {
-            Some(rt) => rt,
-            None => {
-                unity_log_error!("BLE not initialized. Call BLEInit() first.");
+        #[cfg(target_env = "ohos")]
+        {
+            crate::ohos::start_scan()
+        }
+
+        #[cfg(not(target_env = "ohos"))]
+        {
+            let rt_guard = TOKIO_RUNTIME.lock().unwrap();
+            let rt = match rt_guard.as_ref() {
+                Some(rt) => rt,
+                None => {
+                    unity_log_error!("BLE not initialized. Call BLEInit() first.");
+                    return -1;
+                }
+            };
+
+            let adapters = BLE_ADAPTERS.lock().unwrap().clone();
+            if adapters.is_empty() {
+                unity_log_warning!("No BLE adapters available to scan.");
                 return -1;
             }
-        };
 
-        let adapters = BLE_ADAPTERS.lock().unwrap().clone();
-        if adapters.is_empty() {
-            unity_log_warning!("No BLE adapters available to scan.");
-            return -1;
-        }
+            let mut scan_tasks = SCAN_TASKS.lock().unwrap();
+            for (index, adapter) in adapters.into_iter().enumerate() {
+                let handle = rt.spawn(async move {
+                    unity_log!("Starting scan on adapter {}", index);
+                    if let Err(e) = adapter.start_scan(ScanFilter::default()).await {
+                        unity_log_error!("Failed to start scan on adapter {}: {:?}", index, e);
+                        return;
+                    }
 
-        let mut scan_tasks = SCAN_TASKS.lock().unwrap();
-        for (index, adapter) in adapters.into_iter().enumerate() {
-            let handle = rt.spawn(async move {
-                unity_log!("Starting scan on adapter {}", index);
-                if let Err(e) = adapter.start_scan(ScanFilter::default()).await {
-                    unity_log_error!("Failed to start scan on adapter {}: {:?}", index, e);
-                    return;
-                }
+                    if let Ok(mut event_stream) = adapter.events().await {
+                        while let Some(event) = event_stream.next().await {
+                            match event {
+                                CentralEvent::DeviceDiscovered(id)
+                                | CentralEvent::DeviceUpdated(id)
+                                | CentralEvent::ManufacturerDataAdvertisement { id, .. }
+                                | CentralEvent::ServiceDataAdvertisement { id, .. }
+                                | CentralEvent::ServicesAdvertisement { id, .. } => {
+                                    if let Ok(peripheral) = adapter.peripheral(&id).await {
+                                        let id_str = get_peripheral_id_string(&peripheral);
+                                        let props = peripheral.properties().await.ok().flatten();
 
-                if let Ok(mut event_stream) = adapter.events().await {
-                    while let Some(event) = event_stream.next().await {
-                        match event {
-                            CentralEvent::DeviceDiscovered(id)
-                            | CentralEvent::DeviceUpdated(id)
-                            | CentralEvent::ManufacturerDataAdvertisement { id, .. }
-                            | CentralEvent::ServiceDataAdvertisement { id, .. }
-                            | CentralEvent::ServicesAdvertisement { id, .. } => {
-                                if let Ok(peripheral) = adapter.peripheral(&id).await {
-                                    let id_str = get_peripheral_id_string(&peripheral);
-                                    let props = peripheral.properties().await.ok().flatten();
+                                        let name = props.as_ref().and_then(|p| p.local_name.clone());
+                                        let address = props
+                                            .as_ref()
+                                            .map(|p| format!("{:?}", p.address));
+                                        let rssi = props.as_ref().and_then(|p| p.rssi);
+                                        let services: Vec<String> = props
+                                            .as_ref()
+                                            .map(|p| p.services.iter().map(|u| u.to_string()).collect())
+                                            .unwrap_or_default();
 
-                                    let name = props.as_ref().and_then(|p| p.local_name.clone());
-                                    let address = props
-                                        .as_ref()
-                                        .map(|p| format!("{:?}", p.address));
-                                    let rssi = props.as_ref().and_then(|p| p.rssi);
-                                    let services: Vec<String> = props
-                                        .as_ref()
-                                        .map(|p| p.services.iter().map(|u| u.to_string()).collect())
-                                        .unwrap_or_default();
+                                        let info = DiscoveredDeviceInfo {
+                                            id: id_str.clone(),
+                                            name: name.clone(),
+                                            address: address.clone(),
+                                            rssi,
+                                            services: services.clone(),
+                                        };
 
-                                    let info = DiscoveredDeviceInfo {
-                                        id: id_str.clone(),
-                                        name: name.clone(),
-                                        address: address.clone(),
-                                        rssi,
-                                        services: services.clone(),
-                                    };
+                                        DISCOVERED_DEVICES
+                                            .lock()
+                                            .unwrap()
+                                            .insert(id_str.clone(), info);
+                                        DISCOVERED_PERIPHERALS
+                                            .lock()
+                                            .unwrap()
+                                            .insert(id_str.clone(), peripheral);
 
-                                    DISCOVERED_DEVICES
-                                        .lock()
-                                        .unwrap()
-                                        .insert(id_str.clone(), info);
-                                    DISCOVERED_PERIPHERALS
-                                        .lock()
-                                        .unwrap()
-                                        .insert(id_str.clone(), peripheral);
-
-                                    EVENT_QUEUE.push(BleEvent::DeviceDiscovered {
-                                        id: id_str,
-                                        name,
-                                        address,
-                                        rssi,
-                                        services,
-                                    });
+                                        EVENT_QUEUE.push(BleEvent::DeviceDiscovered {
+                                            id: id_str,
+                                            name,
+                                            address,
+                                            rssi,
+                                            services,
+                                        });
+                                    }
                                 }
+                                CentralEvent::DeviceConnected(id) => {
+                                    EVENT_QUEUE.push(BleEvent::Connected { id: id.to_string() });
+                                }
+                                CentralEvent::DeviceDisconnected(id) => {
+                                    EVENT_QUEUE.push(BleEvent::Disconnected { id: id.to_string() });
+                                }
+                                _ => {}
                             }
-                            CentralEvent::DeviceConnected(id) => {
-                                EVENT_QUEUE.push(BleEvent::Connected { id: id.to_string() });
-                            }
-                            CentralEvent::DeviceDisconnected(id) => {
-                                EVENT_QUEUE.push(BleEvent::Disconnected { id: id.to_string() });
-                            }
-                            _ => {}
                         }
                     }
-                }
-            });
-            scan_tasks.push(handle);
-        }
+                });
+                scan_tasks.push(handle);
+            }
 
-        0
+            0
+        }
     })
     .unwrap_or(-1)
 }
@@ -580,28 +622,36 @@ pub extern "C" fn BLEStopScan() -> i32 {
     catch_unwind(|| {
         unity_log!("Stopping BLE scan...");
 
+        #[cfg(target_env = "ohos")]
         {
-            let mut scan_tasks = SCAN_TASKS.lock().unwrap();
-            for handle in scan_tasks.drain(..) {
-                handle.abort();
-            }
+            crate::ohos::stop_scan()
         }
 
-        let rt_guard = TOKIO_RUNTIME.lock().unwrap();
-        let rt = match rt_guard.as_ref() {
-            Some(rt) => rt,
-            None => return -1,
-        };
-
-        let adapters = BLE_ADAPTERS.lock().unwrap().clone();
-        for (index, adapter) in adapters.into_iter().enumerate() {
-            if let Err(e) = rt.block_on(async { adapter.stop_scan().await }) {
-                unity_log_error!("Failed to stop scan on adapter {}: {:?}", index, e);
+        #[cfg(not(target_env = "ohos"))]
+        {
+            {
+                let mut scan_tasks = SCAN_TASKS.lock().unwrap();
+                for handle in scan_tasks.drain(..) {
+                    handle.abort();
+                }
             }
-        }
 
-        unity_log!("Scan stopped");
-        0
+            let rt_guard = TOKIO_RUNTIME.lock().unwrap();
+            let rt = match rt_guard.as_ref() {
+                Some(rt) => rt,
+                None => return -1,
+            };
+
+            let adapters = BLE_ADAPTERS.lock().unwrap().clone();
+            for (index, adapter) in adapters.into_iter().enumerate() {
+                if let Err(e) = rt.block_on(async { adapter.stop_scan().await }) {
+                    unity_log_error!("Failed to stop scan on adapter {}: {:?}", index, e);
+                }
+            }
+
+            unity_log!("Scan stopped");
+            0
+        }
     })
     .unwrap_or(-1)
 }
@@ -647,56 +697,64 @@ pub unsafe extern "C" fn BLEConnect(device_id: *const c_char) -> i32 {
 
         unity_log!("Connecting to device: {}", device_id_str);
 
-        let peripheral = {
-            let cache = DISCOVERED_PERIPHERALS.lock().unwrap();
-            cache.get(&device_id_str).cloned()
-        };
+        #[cfg(target_env = "ohos")]
+        {
+            crate::ohos::connect(&device_id_str)
+        }
 
-        let peripheral = match peripheral {
-            Some(p) => p,
-            None => {
-                unity_log_error!("Device not found in discovery cache: {}", device_id_str);
-                return -1;
-            }
-        };
+        #[cfg(not(target_env = "ohos"))]
+        {
+            let peripheral = {
+                let cache = DISCOVERED_PERIPHERALS.lock().unwrap();
+                cache.get(&device_id_str).cloned()
+            };
 
-        let rt_guard = TOKIO_RUNTIME.lock().unwrap();
-        let rt = match rt_guard.as_ref() {
-            Some(rt) => rt,
-            None => return -1,
-        };
+            let peripheral = match peripheral {
+                Some(p) => p,
+                None => {
+                    unity_log_error!("Device not found in discovery cache: {}", device_id_str);
+                    return -1;
+                }
+            };
 
-        let connect_result = rt.block_on(async {
-            tokio::time::timeout(Duration::from_secs(10), peripheral.connect()).await
-        });
+            let rt_guard = TOKIO_RUNTIME.lock().unwrap();
+            let rt = match rt_guard.as_ref() {
+                Some(rt) => rt,
+                None => return -1,
+            };
 
-        match connect_result {
-            Ok(Ok(_)) => {
-                CONNECTED_PERIPHERALS
-                    .lock()
-                    .unwrap()
-                    .insert(device_id_str.clone(), peripheral);
-                EVENT_QUEUE.push(BleEvent::Connected {
-                    id: device_id_str.clone(),
-                });
-                unity_log!("Connected to device: {}", device_id_str);
-                0
-            }
-            Ok(Err(e)) => {
-                unity_log_error!("Failed to connect to {}: {:?}", device_id_str, e);
-                EVENT_QUEUE.push(BleEvent::Error {
-                    message: format!("Failed to connect: {:?}", e),
-                    id: Some(device_id_str),
-                });
-                -1
-            }
-            Err(_) => {
-                unity_log_error!("Connection to {} timed out", device_id_str);
-                EVENT_QUEUE.push(BleEvent::Error {
-                    message: "Connection timed out".into(),
-                    id: Some(device_id_str),
-                });
-                -1
+            let connect_result = rt.block_on(async {
+                tokio::time::timeout(Duration::from_secs(10), peripheral.connect()).await
+            });
+
+            match connect_result {
+                Ok(Ok(_)) => {
+                    CONNECTED_PERIPHERALS
+                        .lock()
+                        .unwrap()
+                        .insert(device_id_str.clone(), peripheral);
+                    EVENT_QUEUE.push(BleEvent::Connected {
+                        id: device_id_str.clone(),
+                    });
+                    unity_log!("Connected to device: {}", device_id_str);
+                    0
+                }
+                Ok(Err(e)) => {
+                    unity_log_error!("Failed to connect to {}: {:?}", device_id_str, e);
+                    EVENT_QUEUE.push(BleEvent::Error {
+                        message: format!("Failed to connect: {:?}", e),
+                        id: Some(device_id_str),
+                    });
+                    -1
+                }
+                Err(_) => {
+                    unity_log_error!("Connection to {} timed out", device_id_str);
+                    EVENT_QUEUE.push(BleEvent::Error {
+                        message: "Connection timed out".into(),
+                        id: Some(device_id_str),
+                    });
+                    -1
+                }
             }
         }
     })
@@ -719,29 +777,37 @@ pub unsafe extern "C" fn BLEDisconnect(device_id: *const c_char) -> i32 {
 
         unity_log!("Disconnecting from device: {}", device_id_str);
 
-        let peripheral = CONNECTED_PERIPHERALS.lock().unwrap().remove(&device_id_str);
-        let peripheral = match peripheral {
-            Some(p) => p,
-            None => return -1,
-        };
+        #[cfg(target_env = "ohos")]
+        {
+            crate::ohos::disconnect(&device_id_str)
+        }
 
-        let rt_guard = TOKIO_RUNTIME.lock().unwrap();
-        let rt = match rt_guard.as_ref() {
-            Some(rt) => rt,
-            None => return -1,
-        };
+        #[cfg(not(target_env = "ohos"))]
+        {
+            let peripheral = CONNECTED_PERIPHERALS.lock().unwrap().remove(&device_id_str);
+            let peripheral = match peripheral {
+                Some(p) => p,
+                None => return -1,
+            };
 
-        match rt.block_on(async { peripheral.disconnect().await }) {
-            Ok(_) => {
-                EVENT_QUEUE.push(BleEvent::Disconnected {
-                    id: device_id_str.clone(),
-                });
-                unity_log!("Disconnected from device: {}", device_id_str);
-                0
-            }
-            Err(e) => {
-                unity_log_error!("Failed to disconnect: {:?}", e);
-                -1
+            let rt_guard = TOKIO_RUNTIME.lock().unwrap();
+            let rt = match rt_guard.as_ref() {
+                Some(rt) => rt,
+                None => return -1,
+            };
+
+            match rt.block_on(async { peripheral.disconnect().await }) {
+                Ok(_) => {
+                    EVENT_QUEUE.push(BleEvent::Disconnected {
+                        id: device_id_str.clone(),
+                    });
+                    unity_log!("Disconnected from device: {}", device_id_str);
+                    0
+                }
+                Err(e) => {
+                    unity_log_error!("Failed to disconnect: {:?}", e);
+                    -1
+                }
             }
         }
     })
@@ -762,32 +828,41 @@ pub unsafe extern "C" fn BLEIsConnected(device_id: *const c_char) -> i32 {
             None => return -1,
         };
 
-        let peripheral = CONNECTED_PERIPHERALS
-            .lock()
-            .unwrap()
-            .get(&device_id_str)
-            .cloned();
+        #[cfg(target_env = "ohos")]
+        {
+            let map = crate::ohos::OHOS_CONNECTED_DEVICES.lock().unwrap();
+            if map.contains_key(&device_id_str) { 1 } else { 0 }
+        }
 
-        let peripheral = match peripheral {
-            Some(p) => p,
-            None => return 0,
-        };
+        #[cfg(not(target_env = "ohos"))]
+        {
+            let peripheral = CONNECTED_PERIPHERALS
+                .lock()
+                .unwrap()
+                .get(&device_id_str)
+                .cloned();
 
-        let rt_guard = TOKIO_RUNTIME.lock().unwrap();
-        let rt = match rt_guard.as_ref() {
-            Some(rt) => rt,
-            None => return -1,
-        };
+            let peripheral = match peripheral {
+                Some(p) => p,
+                None => return 0,
+            };
 
-        match rt.block_on(async { peripheral.is_connected().await }) {
-            Ok(connected) => {
-                if connected {
-                    1
-                } else {
-                    0
+            let rt_guard = TOKIO_RUNTIME.lock().unwrap();
+            let rt = match rt_guard.as_ref() {
+                Some(rt) => rt,
+                None => return -1,
+            };
+
+            match rt.block_on(async { peripheral.is_connected().await }) {
+                Ok(connected) => {
+                    if connected {
+                        1
+                    } else {
+                        0
+                    }
                 }
+                Err(_) => -1,
             }
-            Err(_) => -1,
         }
     })
     .unwrap_or(-1)
@@ -807,31 +882,39 @@ pub unsafe extern "C" fn BLEDiscoverServices(device_id: *const c_char) -> i32 {
             None => return -1,
         };
 
-        let peripheral = CONNECTED_PERIPHERALS
-            .lock()
-            .unwrap()
-            .get(&device_id_str)
-            .cloned();
+        #[cfg(target_env = "ohos")]
+        {
+            crate::ohos::discover_services(&device_id_str)
+        }
 
-        let peripheral = match peripheral {
-            Some(p) => p,
-            None => return -1,
-        };
+        #[cfg(not(target_env = "ohos"))]
+        {
+            let peripheral = CONNECTED_PERIPHERALS
+                .lock()
+                .unwrap()
+                .get(&device_id_str)
+                .cloned();
 
-        let rt_guard = TOKIO_RUNTIME.lock().unwrap();
-        let rt = match rt_guard.as_ref() {
-            Some(rt) => rt,
-            None => return -1,
-        };
+            let peripheral = match peripheral {
+                Some(p) => p,
+                None => return -1,
+            };
 
-        match rt.block_on(async { peripheral.discover_services().await }) {
-            Ok(_) => {
-                unity_log!("Services discovered for: {}", device_id_str);
-                0
-            }
-            Err(e) => {
-                unity_log_error!("Failed to discover services: {:?}", e);
-                -1
+            let rt_guard = TOKIO_RUNTIME.lock().unwrap();
+            let rt = match rt_guard.as_ref() {
+                Some(rt) => rt,
+                None => return -1,
+            };
+
+            match rt.block_on(async { peripheral.discover_services().await }) {
+                Ok(_) => {
+                    unity_log!("Services discovered for: {}", device_id_str);
+                    0
+                }
+                Err(e) => {
+                    unity_log_error!("Failed to discover services: {:?}", e);
+                    -1
+                }
             }
         }
     })
@@ -856,45 +939,55 @@ pub unsafe extern "C" fn BLEGetGattProfileJson(
             None => return -1,
         };
 
-        let peripheral = CONNECTED_PERIPHERALS
-            .lock()
-            .unwrap()
-            .get(&device_id_str)
-            .cloned();
+        #[cfg(target_env = "ohos")]
+        {
+            let _ = &device_id_str;
+            let empty_json = "[]";
+            copy_str_to_c_buffer(empty_json, out_buffer, max_len)
+        }
 
-        let peripheral = match peripheral {
-            Some(p) => p,
-            None => return -1,
-        };
+        #[cfg(not(target_env = "ohos"))]
+        {
+            let peripheral = CONNECTED_PERIPHERALS
+                .lock()
+                .unwrap()
+                .get(&device_id_str)
+                .cloned();
 
-        let mut services_info = Vec::new();
-        for service in peripheral.services() {
-            let mut chars_info = Vec::new();
-            for c in &service.characteristics {
-                let descriptors: Vec<String> =
-                    c.descriptors.iter().map(|d| d.uuid.to_string()).collect();
-                chars_info.push(GattCharInfo {
-                    uuid: c.uuid.to_string(),
-                    can_read: c.properties.contains(CharPropFlags::READ),
-                    can_write: c.properties.contains(CharPropFlags::WRITE),
-                    can_write_without_response: c
-                        .properties
-                        .contains(CharPropFlags::WRITE_WITHOUT_RESPONSE),
-                    can_notify: c.properties.contains(CharPropFlags::NOTIFY),
-                    can_indicate: c.properties.contains(CharPropFlags::INDICATE),
-                    descriptors,
+            let peripheral = match peripheral {
+                Some(p) => p,
+                None => return -1,
+            };
+
+            let mut services_info = Vec::new();
+            for service in peripheral.services() {
+                let mut chars_info = Vec::new();
+                for c in &service.characteristics {
+                    let descriptors: Vec<String> =
+                        c.descriptors.iter().map(|d| d.uuid.to_string()).collect();
+                    chars_info.push(GattCharInfo {
+                        uuid: c.uuid.to_string(),
+                        can_read: c.properties.contains(CharPropFlags::READ),
+                        can_write: c.properties.contains(CharPropFlags::WRITE),
+                        can_write_without_response: c
+                            .properties
+                            .contains(CharPropFlags::WRITE_WITHOUT_RESPONSE),
+                        can_notify: c.properties.contains(CharPropFlags::NOTIFY),
+                        can_indicate: c.properties.contains(CharPropFlags::INDICATE),
+                        descriptors,
+                    });
+                }
+
+                services_info.push(GattServiceInfo {
+                    uuid: service.uuid.to_string(),
+                    primary: service.primary,
+                    characteristics: chars_info,
                 });
             }
 
-            services_info.push(GattServiceInfo {
-                uuid: service.uuid.to_string(),
-                primary: service.primary,
-                characteristics: chars_info,
-            });
+            let json_str = serde_json::to_string(&services_info).unwrap_or_else(|_| "[]".to_string());
+            copy_str_to_c_buffer(&json_str, out_buffer, max_len)
         }
-
-        let json_str = serde_json::to_string(&services_info).unwrap_or_else(|_| "[]".to_string());
-        copy_str_to_c_buffer(&json_str, out_buffer, max_len)
     })
     .unwrap_or(-1)
 }
@@ -919,37 +1012,47 @@ pub unsafe extern "C" fn BLEReadCharacteristic(
         };
 
         let uuid = Uuid::from(characteristic_uuid);
-        let peripheral = CONNECTED_PERIPHERALS
-            .lock()
-            .unwrap()
-            .get(&device_id_str)
-            .cloned();
 
-        let peripheral = match peripheral {
-            Some(p) => p,
-            None => return -1,
-        };
+        #[cfg(target_env = "ohos")]
+        {
+            let _ = (data, max_len);
+            crate::ohos::read_characteristic(&device_id_str, &uuid.to_string())
+        }
 
-        let rt_guard = TOKIO_RUNTIME.lock().unwrap();
-        let rt = match rt_guard.as_ref() {
-            Some(rt) => rt,
-            None => return -1,
-        };
+        #[cfg(not(target_env = "ohos"))]
+        {
+            let peripheral = CONNECTED_PERIPHERALS
+                .lock()
+                .unwrap()
+                .get(&device_id_str)
+                .cloned();
 
-        let result = rt.block_on(async {
-            for char in peripheral.characteristics() {
-                if char.uuid == uuid {
-                    return peripheral.read(&char).await;
+            let peripheral = match peripheral {
+                Some(p) => p,
+                None => return -1,
+            };
+
+            let rt_guard = TOKIO_RUNTIME.lock().unwrap();
+            let rt = match rt_guard.as_ref() {
+                Some(rt) => rt,
+                None => return -1,
+            };
+
+            let result = rt.block_on(async {
+                for char in peripheral.characteristics() {
+                    if char.uuid == uuid {
+                        return peripheral.read(&char).await;
+                    }
                 }
-            }
-            Err(btleplug::Error::Other("Characteristic not found".into()))
-        });
+                Err(btleplug::Error::Other("Characteristic not found".into()))
+            });
 
-        match result {
-            Ok(vec_data) => copy_to_c_buffer(&vec_data, data, max_len),
-            Err(e) => {
-                unity_log_error!("Failed to read characteristic {}: {:?}", uuid, e);
-                -1
+            match result {
+                Ok(vec_data) => copy_to_c_buffer(&vec_data, data, max_len),
+                Err(e) => {
+                    unity_log_error!("Failed to read characteristic {}: {:?}", uuid, e);
+                    -1
+                }
             }
         }
     })
@@ -987,43 +1090,52 @@ pub unsafe extern "C" fn BLEWriteCharacteristic(
         };
 
         let uuid = Uuid::from(characteristic_uuid);
-        let peripheral = CONNECTED_PERIPHERALS
-            .lock()
-            .unwrap()
-            .get(&device_id_str)
-            .cloned();
 
-        let peripheral = match peripheral {
-            Some(p) => p,
-            None => return -1,
-        };
+        #[cfg(target_env = "ohos")]
+        {
+            crate::ohos::write_characteristic(&device_id_str, &uuid.to_string(), slice, without_response == 0)
+        }
 
-        let rt_guard = TOKIO_RUNTIME.lock().unwrap();
-        let rt = match rt_guard.as_ref() {
-            Some(rt) => rt,
-            None => return -1,
-        };
+        #[cfg(not(target_env = "ohos"))]
+        {
+            let peripheral = CONNECTED_PERIPHERALS
+                .lock()
+                .unwrap()
+                .get(&device_id_str)
+                .cloned();
 
-        let write_type = if without_response != 0 {
-            btleplug::api::WriteType::WithoutResponse
-        } else {
-            btleplug::api::WriteType::WithResponse
-        };
+            let peripheral = match peripheral {
+                Some(p) => p,
+                None => return -1,
+            };
 
-        let result = rt.block_on(async {
-            for char in peripheral.characteristics() {
-                if char.uuid == uuid {
-                    return peripheral.write(&char, slice, write_type).await;
+            let rt_guard = TOKIO_RUNTIME.lock().unwrap();
+            let rt = match rt_guard.as_ref() {
+                Some(rt) => rt,
+                None => return -1,
+            };
+
+            let write_type = if without_response != 0 {
+                btleplug::api::WriteType::WithoutResponse
+            } else {
+                btleplug::api::WriteType::WithResponse
+            };
+
+            let result = rt.block_on(async {
+                for char in peripheral.characteristics() {
+                    if char.uuid == uuid {
+                        return peripheral.write(&char, slice, write_type).await;
+                    }
                 }
-            }
-            Err(btleplug::Error::Other("Characteristic not found".into()))
-        });
+                Err(btleplug::Error::Other("Characteristic not found".into()))
+            });
 
-        match result {
-            Ok(_) => 0,
-            Err(e) => {
-                unity_log_error!("Failed to write characteristic {}: {:?}", uuid, e);
-                -1
+            match result {
+                Ok(_) => 0,
+                Err(e) => {
+                    unity_log_error!("Failed to write characteristic {}: {:?}", uuid, e);
+                    -1
+                }
             }
         }
     })
@@ -1048,66 +1160,75 @@ pub unsafe extern "C" fn BLESubscribeCharacteristic(
         };
 
         let uuid = Uuid::from(characteristic_uuid);
-        let peripheral = CONNECTED_PERIPHERALS
-            .lock()
-            .unwrap()
-            .get(&device_id_str)
-            .cloned();
 
-        let peripheral = match peripheral {
-            Some(p) => p,
-            None => return -1,
-        };
-
-        let rt_guard = TOKIO_RUNTIME.lock().unwrap();
-        let rt = match rt_guard.as_ref() {
-            Some(rt) => rt,
-            None => return -1,
-        };
-
-        let target_char = peripheral
-            .characteristics()
-            .into_iter()
-            .find(|c| c.uuid == uuid);
-
-        let target_char = match target_char {
-            Some(c) => c,
-            None => {
-                unity_log_error!("Characteristic not found: {}", uuid);
-                return -1;
-            }
-        };
-
-        let sub_result = rt.block_on(async { peripheral.subscribe(&target_char).await });
-        if let Err(e) = sub_result {
-            unity_log_error!("Failed to subscribe to characteristic: {:?}", e);
-            return -1;
+        #[cfg(target_env = "ohos")]
+        {
+            crate::ohos::subscribe(&device_id_str, &uuid.to_string())
         }
 
-        // Spawn notification stream reader task
-        let dev_id_clone = device_id_str.clone();
-        let periph_clone = peripheral.clone();
-        let task_key = format!("{}_{}", device_id_str, uuid);
+        #[cfg(not(target_env = "ohos"))]
+        {
+            let peripheral = CONNECTED_PERIPHERALS
+                .lock()
+                .unwrap()
+                .get(&device_id_str)
+                .cloned();
 
-        let task_handle = rt.spawn(async move {
-            if let Ok(mut notif_stream) = periph_clone.notifications().await {
-                while let Some(notif) = notif_stream.next().await {
-                    if notif.uuid == uuid {
-                        EVENT_QUEUE.push(BleEvent::Notification {
-                            id: dev_id_clone.clone(),
-                            characteristic: notif.uuid.to_string(),
-                            data: notif.value,
-                        });
+            let peripheral = match peripheral {
+                Some(p) => p,
+                None => return -1,
+            };
+
+            let rt_guard = TOKIO_RUNTIME.lock().unwrap();
+            let rt = match rt_guard.as_ref() {
+                Some(rt) => rt,
+                None => return -1,
+            };
+
+            let target_char = peripheral
+                .characteristics()
+                .into_iter()
+                .find(|c| c.uuid == uuid);
+
+            let target_char = match target_char {
+                Some(c) => c,
+                None => {
+                    unity_log_error!("Characteristic not found: {}", uuid);
+                    return -1;
+                }
+            };
+
+            let sub_result = rt.block_on(async { peripheral.subscribe(&target_char).await });
+            if let Err(e) = sub_result {
+                unity_log_error!("Failed to subscribe to characteristic: {:?}", e);
+                return -1;
+            }
+
+            // Spawn notification stream reader task
+            let dev_id_clone = device_id_str.clone();
+            let periph_clone = peripheral.clone();
+            let task_key = format!("{}_{}", device_id_str, uuid);
+
+            let task_handle = rt.spawn(async move {
+                if let Ok(mut notif_stream) = periph_clone.notifications().await {
+                    while let Some(notif) = notif_stream.next().await {
+                        if notif.uuid == uuid {
+                            EVENT_QUEUE.push(BleEvent::Notification {
+                                id: dev_id_clone.clone(),
+                                characteristic: notif.uuid.to_string(),
+                                data: notif.value,
+                            });
+                        }
                     }
                 }
-            }
-        });
+            });
 
-        NOTIFICATION_TASKS
-            .lock()
-            .unwrap()
-            .insert(task_key, task_handle);
-        0
+            NOTIFICATION_TASKS
+                .lock()
+                .unwrap()
+                .insert(task_key, task_handle);
+            0
+        }
     })
     .unwrap_or(-1)
 }
@@ -1130,39 +1251,48 @@ pub unsafe extern "C" fn BLEUnsubscribeCharacteristic(
         };
 
         let uuid = Uuid::from(characteristic_uuid);
-        let task_key = format!("{}_{}", device_id_str, uuid);
 
-        if let Some(handle) = NOTIFICATION_TASKS.lock().unwrap().remove(&task_key) {
-            handle.abort();
+        #[cfg(target_env = "ohos")]
+        {
+            crate::ohos::unsubscribe(&device_id_str, &uuid.to_string())
         }
 
-        let peripheral = CONNECTED_PERIPHERALS
-            .lock()
-            .unwrap()
-            .get(&device_id_str)
-            .cloned();
+        #[cfg(not(target_env = "ohos"))]
+        {
+            let task_key = format!("{}_{}", device_id_str, uuid);
 
-        let peripheral = match peripheral {
-            Some(p) => p,
-            None => return -1,
-        };
+            if let Some(handle) = NOTIFICATION_TASKS.lock().unwrap().remove(&task_key) {
+                handle.abort();
+            }
 
-        let rt_guard = TOKIO_RUNTIME.lock().unwrap();
-        let rt = match rt_guard.as_ref() {
-            Some(rt) => rt,
-            None => return -1,
-        };
+            let peripheral = CONNECTED_PERIPHERALS
+                .lock()
+                .unwrap()
+                .get(&device_id_str)
+                .cloned();
 
-        let target_char = peripheral
-            .characteristics()
-            .into_iter()
-            .find(|c| c.uuid == uuid);
+            let peripheral = match peripheral {
+                Some(p) => p,
+                None => return -1,
+            };
 
-        if let Some(c) = target_char {
-            let _ = rt.block_on(async { peripheral.unsubscribe(&c).await });
+            let rt_guard = TOKIO_RUNTIME.lock().unwrap();
+            let rt = match rt_guard.as_ref() {
+                Some(rt) => rt,
+                None => return -1,
+            };
+
+            let target_char = peripheral
+                .characteristics()
+                .into_iter()
+                .find(|c| c.uuid == uuid);
+
+            if let Some(c) = target_char {
+                let _ = rt.block_on(async { peripheral.unsubscribe(&c).await });
+            }
+
+            0
         }
-
-        0
     })
     .unwrap_or(-1)
 }
@@ -1190,41 +1320,50 @@ pub unsafe extern "C" fn BLEReadDescriptor(
         let char_uuid = Uuid::from(characteristic_uuid);
         let desc_uuid = Uuid::from(descriptor_uuid);
 
-        let peripheral = CONNECTED_PERIPHERALS
-            .lock()
-            .unwrap()
-            .get(&device_id_str)
-            .cloned();
+        #[cfg(target_env = "ohos")]
+        {
+            let _ = (&device_id_str, char_uuid, desc_uuid, data, max_len);
+            0
+        }
 
-        let peripheral = match peripheral {
-            Some(p) => p,
-            None => return -1,
-        };
+        #[cfg(not(target_env = "ohos"))]
+        {
+            let peripheral = CONNECTED_PERIPHERALS
+                .lock()
+                .unwrap()
+                .get(&device_id_str)
+                .cloned();
 
-        let rt_guard = TOKIO_RUNTIME.lock().unwrap();
-        let rt = match rt_guard.as_ref() {
-            Some(rt) => rt,
-            None => return -1,
-        };
+            let peripheral = match peripheral {
+                Some(p) => p,
+                None => return -1,
+            };
 
-        let result = rt.block_on(async {
-            for char in peripheral.characteristics() {
-                if char_uuid.is_nil() || char.uuid == char_uuid {
-                    for desc in char.descriptors {
-                        if desc.uuid == desc_uuid {
-                            return peripheral.read_descriptor(&desc).await;
+            let rt_guard = TOKIO_RUNTIME.lock().unwrap();
+            let rt = match rt_guard.as_ref() {
+                Some(rt) => rt,
+                None => return -1,
+            };
+
+            let result = rt.block_on(async {
+                for char in peripheral.characteristics() {
+                    if char_uuid.is_nil() || char.uuid == char_uuid {
+                        for desc in char.descriptors {
+                            if desc.uuid == desc_uuid {
+                                return peripheral.read_descriptor(&desc).await;
+                            }
                         }
                     }
                 }
-            }
-            Err(btleplug::Error::Other("Descriptor not found".into()))
-        });
+                Err(btleplug::Error::Other("Descriptor not found".into()))
+            });
 
-        match result {
-            Ok(vec_data) => copy_to_c_buffer(&vec_data, data, max_len),
-            Err(e) => {
-                unity_log_error!("Failed to read descriptor {}: {:?}", desc_uuid, e);
-                -1
+            match result {
+                Ok(vec_data) => copy_to_c_buffer(&vec_data, data, max_len),
+                Err(e) => {
+                    unity_log_error!("Failed to read descriptor {}: {:?}", desc_uuid, e);
+                    -1
+                }
             }
         }
     })
@@ -1264,41 +1403,50 @@ pub unsafe extern "C" fn BLEWriteDescriptor(
         let char_uuid = Uuid::from(characteristic_uuid);
         let desc_uuid = Uuid::from(descriptor_uuid);
 
-        let peripheral = CONNECTED_PERIPHERALS
-            .lock()
-            .unwrap()
-            .get(&device_id_str)
-            .cloned();
+        #[cfg(target_env = "ohos")]
+        {
+            let _ = (&device_id_str, char_uuid, desc_uuid, slice);
+            0
+        }
 
-        let peripheral = match peripheral {
-            Some(p) => p,
-            None => return -1,
-        };
+        #[cfg(not(target_env = "ohos"))]
+        {
+            let peripheral = CONNECTED_PERIPHERALS
+                .lock()
+                .unwrap()
+                .get(&device_id_str)
+                .cloned();
 
-        let rt_guard = TOKIO_RUNTIME.lock().unwrap();
-        let rt = match rt_guard.as_ref() {
-            Some(rt) => rt,
-            None => return -1,
-        };
+            let peripheral = match peripheral {
+                Some(p) => p,
+                None => return -1,
+            };
 
-        let result = rt.block_on(async {
-            for char in peripheral.characteristics() {
-                if char_uuid.is_nil() || char.uuid == char_uuid {
-                    for desc in char.descriptors {
-                        if desc.uuid == desc_uuid {
-                            return peripheral.write_descriptor(&desc, slice).await;
+            let rt_guard = TOKIO_RUNTIME.lock().unwrap();
+            let rt = match rt_guard.as_ref() {
+                Some(rt) => rt,
+                None => return -1,
+            };
+
+            let result = rt.block_on(async {
+                for char in peripheral.characteristics() {
+                    if char_uuid.is_nil() || char.uuid == char_uuid {
+                        for desc in char.descriptors {
+                            if desc.uuid == desc_uuid {
+                                return peripheral.write_descriptor(&desc, slice).await;
+                            }
                         }
                     }
                 }
-            }
-            Err(btleplug::Error::Other("Descriptor not found".into()))
-        });
+                Err(btleplug::Error::Other("Descriptor not found".into()))
+            });
 
-        match result {
-            Ok(_) => 0,
-            Err(e) => {
-                unity_log_error!("Failed to write descriptor {}: {:?}", desc_uuid, e);
-                -1
+            match result {
+                Ok(_) => 0,
+                Err(e) => {
+                    unity_log_error!("Failed to write descriptor {}: {:?}", desc_uuid, e);
+                    -1
+                }
             }
         }
     })
@@ -1511,7 +1659,24 @@ pub unsafe extern "C" fn BLEPeripheralStartAdvertising(
         })
         .unwrap_or(-1)
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_env = "ohos")]
+    {
+        catch_unwind(|| {
+            let name_str = if name.is_null() {
+                "UnityBLE"
+            } else {
+                unsafe { CStr::from_ptr(name) }.to_str().unwrap_or("UnityBLE")
+            };
+            let csv_str = if service_uuids_csv.is_null() {
+                ""
+            } else {
+                unsafe { CStr::from_ptr(service_uuids_csv) }.to_str().unwrap_or("")
+            };
+            crate::ohos::peripheral_start_advertising(name_str, csv_str)
+        })
+        .unwrap_or(-1)
+    }
+    #[cfg(all(not(target_os = "android"), not(target_env = "ohos")))]
     {
         catch_unwind(|| {
             let name_str = if name.is_null() {
@@ -1652,7 +1817,11 @@ pub extern "C" fn BLEPeripheralStopAdvertising() -> i32 {
         })
         .unwrap_or(-1)
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_env = "ohos")]
+    {
+        catch_unwind(crate::ohos::peripheral_stop_advertising).unwrap_or(-1)
+    }
+    #[cfg(all(not(target_os = "android"), not(target_env = "ohos")))]
     {
         catch_unwind(|| {
             let rt_guard = TOKIO_RUNTIME.lock().unwrap();
@@ -1726,7 +1895,15 @@ pub extern "C" fn BLEPeripheralAddService(service_uuid: BLEUuid, primary: i32) -
         })
         .unwrap_or(-1)
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_env = "ohos")]
+    {
+        catch_unwind(|| {
+            let u: Uuid = service_uuid.into();
+            crate::ohos::peripheral_add_service(&u.to_string(), primary != 0)
+        })
+        .unwrap_or(-1)
+    }
+    #[cfg(all(not(target_os = "android"), not(target_env = "ohos")))]
     {
         catch_unwind(|| {
             let u: Uuid = service_uuid.into();
@@ -1801,7 +1978,22 @@ pub extern "C" fn BLEPeripheralAddCharacteristic(
         })
         .unwrap_or(-1)
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_env = "ohos")]
+    {
+        catch_unwind(|| {
+            let s_uuid: Uuid = service_uuid.into();
+            let c_uuid: Uuid = char_uuid.into();
+            crate::ohos::peripheral_add_characteristic(
+                &s_uuid.to_string(),
+                &c_uuid.to_string(),
+                can_read != 0,
+                can_write != 0,
+                can_notify != 0,
+            )
+        })
+        .unwrap_or(-1)
+    }
+    #[cfg(all(not(target_os = "android"), not(target_env = "ohos")))]
     {
         catch_unwind(|| {
             let s_uuid: Uuid = service_uuid.into();
@@ -1911,7 +2103,20 @@ pub unsafe extern "C" fn BLEPeripheralUpdateCharacteristic(
         })
         .unwrap_or(-1)
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_env = "ohos")]
+    {
+        catch_unwind(|| {
+            let c_uuid: Uuid = char_uuid.into();
+            let bytes = if data.is_null() || len == 0 {
+                Vec::new()
+            } else {
+                unsafe { std::slice::from_raw_parts(data, len as usize) }.to_vec()
+            };
+            crate::ohos::peripheral_update_characteristic(&c_uuid.to_string(), &bytes)
+        })
+        .unwrap_or(-1)
+    }
+    #[cfg(all(not(target_os = "android"), not(target_env = "ohos")))]
     {
         catch_unwind(|| {
             let c_uuid: Uuid = char_uuid.into();
@@ -1936,6 +2141,28 @@ pub unsafe extern "C" fn BLEPeripheralUpdateCharacteristic(
             -1
         })
         .unwrap_or(-1)
+    }
+}
+
+/// Initialize BLE subsystem for OpenHarmony
+///
+/// # Safety
+/// `env` and `ability_context` must be valid OpenHarmony N-API environment and context pointers if provided.
+#[ffi_function]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn BLEInitOHOS(
+    env: *mut std::ffi::c_void,
+    ability_context: *mut std::ffi::c_void,
+) -> i32 {
+    #[cfg(target_env = "ohos")]
+    {
+        crate::ohos::init_ohos(env, ability_context)
+    }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        let _ = (env, ability_context);
+        0
     }
 }
 
@@ -1975,6 +2202,7 @@ pub fn ffi_inventory() -> interoptopus::Inventory {
         .register(interoptopus::function!(BLEWriteDescriptor))
         .register(interoptopus::function!(BLEPollEventJson))
         .register(interoptopus::function!(BLEInitAndroid))
+        .register(interoptopus::function!(BLEInitOHOS))
         .register(interoptopus::function!(BLEPeripheralStartAdvertising))
         .register(interoptopus::function!(BLEPeripheralStopAdvertising))
         .register(interoptopus::function!(BLEPeripheralIsAdvertising))
