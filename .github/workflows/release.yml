@@ -249,7 +249,7 @@ jobs:
       - name: Create Package Tarball
         run: |
           VERSION="${{ github.event.inputs.tag || github.ref_name || 'latest' }}"
-          tar -czvf "com.dogedada.native-ble-${VERSION}.tgz" -C ../upm-staging .
+          tar -czvf "../com.dogedada.native-ble-${VERSION}.tgz" -C ../upm-staging .
 
       # Push to orphan UPM branch
       - name: Push to UPM branch
@@ -261,6 +261,7 @@ jobs:
           git branch -D upm 2>/dev/null || true
           git checkout --orphan upm
           git rm -rf .
+          git clean -fdx
           cp -r ../upm-staging/* .
           git add -A
           RELEASE_TAG="${{ github.event.inputs.tag || github.ref_name || 'latest' }}"
@@ -280,6 +281,6 @@ jobs:
         run: |
           VERSION="${{ github.event.inputs.tag || github.ref_name }}"
           gh release create "${VERSION}" \
-            "com.dogedada.native-ble-${VERSION}.tgz" \
+            "../com.dogedada.native-ble-${VERSION}.tgz" \
             --title "${VERSION}" \
             --generate-notes

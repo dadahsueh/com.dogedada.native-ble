@@ -62,7 +62,7 @@ In Unity: **Window > Package Manager > `+` > Add package from git URL...**:
 ```
 https://github.com/dadahsueh/com.dogedada.native-ble.git#upm
 ```
-*(Or pin to a specific release tag such as `#v0.2.0`)*
+*(Or pin to a specific release tag such as `#v0.3.0`)*
 
 Or add directly to `Packages/manifest.json`:
 
@@ -96,7 +96,7 @@ Or add the scoped registry to `Packages/manifest.json`:
     }
   ],
   "dependencies": {
-    "com.dogedada.native-ble": "0.2.0"
+    "com.dogedada.native-ble": "0.3.0"
   }
 }
 ```
