@@ -1,0 +1,9 @@
+[package]
+name = "generate_bindings"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+interoptopus = "0.14.27"
+interoptopus_backend_csharp = "0.14.25"
+unity_native_ble = { path = ".." }
