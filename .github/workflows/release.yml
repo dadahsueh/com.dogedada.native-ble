@@ -1,0 +1,187 @@
+name: Release & UPM Branch
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # -------------------------------------------------------------
+  # 1. Build macOS Universal Bundle & iOS Framework
+  # -------------------------------------------------------------
+  build-apple:
+    name: Build (macOS & iOS)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin, aarch64-apple-ios
+
+      - name: Build Universal macOS Bundle
+        run: python3 build.py --target macos-universal
+
+      - name: Build iOS Framework
+        run: python3 build.py --target ios
+
+      - name: Upload Apple Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: apple-plugins
+          path: |
+            Runtime/Plugins/macOS/
+            Runtime/Plugins/iOS/
+
+  # -------------------------------------------------------------
+  # 2. Build Windows x64 DLL
+  # -------------------------------------------------------------
+  build-windows:
+    name: Build (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build Windows DLL
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Stage Windows Plugin
+        shell: bash
+        run: |
+          mkdir -p Runtime/Plugins/Windows
+          cp target/x86_64-pc-windows-msvc/release/unity_native_ble.dll Runtime/Plugins/Windows/
+
+      - name: Upload Windows Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-plugins
+          path: Runtime/Plugins/Windows/
+
+  # -------------------------------------------------------------
+  # 3. Build Linux x64 SO
+  # -------------------------------------------------------------
+  build-linux:
+    name: Build (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Build Linux SO
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+
+      - name: Stage Linux Plugin
+        run: |
+          mkdir -p Runtime/Plugins/Linux
+          cp target/x86_64-unknown-linux-gnu/release/libunity_native_ble.so Runtime/Plugins/Linux/
+
+      - name: Upload Linux Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-plugins
+          path: Runtime/Plugins/Linux/
+
+  # -------------------------------------------------------------
+  # 4. Assemble Plugins, Deploy UPM Branch, & Publish Release
+  # -------------------------------------------------------------
+  deploy-upm:
+    name: Deploy UPM Branch & Release
+    needs: [build-apple, build-windows, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Download all compiled plugins
+      - name: Download Apple Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: apple-plugins
+          path: Runtime/Plugins/
+
+      - name: Download Windows Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-plugins
+          path: Runtime/Plugins/Windows/
+
+      - name: Download Linux Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-plugins
+          path: Runtime/Plugins/Linux/
+
+      - name: Verify Staged Plugins
+        run: |
+          echo "=== Plugins Directory Tree ==="
+          find Runtime/Plugins -maxdepth 3
+
+      # Prepare clean package tree for UPM branch
+      - name: Prepare UPM Package Directory
+        run: |
+          mkdir -p ../upm-staging
+          cp package.json ../upm-staging/
+          cp package.json.meta ../upm-staging/
+          cp Runtime.meta ../upm-staging/
+          cp README.md ../upm-staging/
+          cp LICENSE.md ../upm-staging/
+          cp LICENSE.md.meta ../upm-staging/
+          cp -r Runtime ../upm-staging/
+
+      # Package tarball for GitHub Release
+      - name: Create Package Tarball
+        run: |
+          VERSION="${GITHUB_REF_NAME:-0.1.0}"
+          tar -czvf "com.dogedada.native-ble-${VERSION}.tgz" -C ../upm-staging .
+
+      # Push to orphan UPM branch
+      - name: Push to UPM branch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git branch -D upm 2>/dev/null || true
+          git checkout --orphan upm
+          git rm -rf .
+          cp -r ../upm-staging/* .
+          git add -A
+          git commit -m "chore: release package ${GITHUB_REF_NAME:-latest} [skip ci]"
+          git push origin upm --force
+
+          if [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+ ]]; then
+            git tag -f "${GITHUB_REF_NAME}"
+            git push origin "${GITHUB_REF_NAME}" --force
+          fi
+
+      # Create GitHub Release if triggered by tag
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          gh release create "${VERSION}" \
+            "com.dogedada.native-ble-${VERSION}.tgz" \
+            --title "${VERSION}" \
+            --generate-notes
