@@ -1,0 +1,3 @@
+-keep class com.dogedada.nativeble.** { *; }
+-keep class com.nonpolynomial.btleplug.android.impl.** { *; }
+-keep class io.github.gedgygedgy.** { *; }

@@ -1,6 +1,8 @@
 use unity_native_ble::{
     BLECleanup, BLEGetAdapterCount, BLEGetDiscoveredDevicesCount,
-    BLEGetDiscoveredDevicesJson, BLEInit, BLEPollEventJson, TestLogging,
+    BLEGetDiscoveredDevicesJson, BLEInit, BLEInitAndroid, BLEPeripheralAddCharacteristic,
+    BLEPeripheralAddService, BLEPeripheralIsAdvertising, BLEPeripheralStopAdvertising,
+    BLEPeripheralUpdateCharacteristic, BLEPollEventJson, BLEUuid, TestLogging,
     EVENT_QUEUE, BleEvent,
 };
 
@@ -58,4 +60,29 @@ fn test_init_and_cleanup_lifecycle() {
     // Cleanup must always succeed safely regardless of init result
     let cleanup_res = BLECleanup();
     assert_eq!(cleanup_res, 0);
+}
+
+#[test]
+fn test_peripheral_and_android_ffi() {
+    // Android helper is safe on all platforms
+    let android_res = unsafe { BLEInitAndroid(std::ptr::null_mut(), std::ptr::null_mut()) };
+    assert_eq!(android_res, 0);
+
+    // Initial peripheral state
+    assert_eq!(BLEPeripheralIsAdvertising(), 0);
+
+    // Add service and characteristic
+    let s_uuid = BLEUuid::default();
+    let c_uuid = BLEUuid::default();
+    assert_eq!(BLEPeripheralAddService(s_uuid, 1), 0);
+    assert_eq!(BLEPeripheralAddCharacteristic(s_uuid, c_uuid, 1, 1, 1), 0);
+
+    // Stop advertising when idle is safe
+    assert_eq!(BLEPeripheralStopAdvertising(), 0);
+    assert_eq!(BLEPeripheralIsAdvertising(), 0);
+
+    // Update characteristic when not advertising fails gracefully
+    let data = [1u8, 2, 3];
+    let update_res = unsafe { BLEPeripheralUpdateCharacteristic(c_uuid, data.as_ptr(), 3) };
+    assert_eq!(update_res, -1);
 }

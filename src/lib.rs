@@ -1,4 +1,6 @@
 use btleplug::api::{Central, CentralEvent, CharPropFlags, Manager as _, Peripheral, ScanFilter};
+#[cfg(not(target_os = "android"))]
+use ble_peripheral_rust::PeripheralImpl;
 use futures::StreamExt;
 use interoptopus::{ffi_function, ffi_type};
 use serde::{Deserialize, Serialize};
@@ -228,6 +230,18 @@ pub enum BleEvent {
         characteristic: String,
         data: Vec<u8>,
     },
+    #[serde(rename = "PeripheralWrite")]
+    PeripheralWrite {
+        client: String,
+        characteristic: String,
+        data: Vec<u8>,
+    },
+    #[serde(rename = "PeripheralSubscription")]
+    PeripheralSubscription {
+        client: String,
+        characteristic: String,
+        subscribed: bool,
+    },
     #[serde(rename = "Error")]
     Error {
         message: String,
@@ -323,6 +337,19 @@ pub static CONNECTED_PERIPHERALS: LazyLock<
 static NOTIFICATION_TASKS: LazyLock<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static SCAN_TASKS: Mutex<Vec<tokio::task::JoinHandle<()>>> = Mutex::new(Vec::new());
+
+#[cfg(not(target_os = "android"))]
+static PERIPHERAL_INSTANCE: Mutex<Option<ble_peripheral_rust::Peripheral>> = Mutex::new(None);
+#[cfg(not(target_os = "android"))]
+static PERIPHERAL_SERVICES: Mutex<Vec<ble_peripheral_rust::gatt::service::Service>> =
+    Mutex::new(Vec::new());
+static PERIPHERAL_ADVERTISING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_os = "android")]
+static ANDROID_APP_CONTEXT: Mutex<Option<jni::objects::GlobalRef>> = Mutex::new(None);
+#[cfg(target_os = "android")]
+static ANDROID_JVM: Mutex<Option<jni::JavaVM>> = Mutex::new(None);
 
 // ===== BLE Internal Helpers =====
 
@@ -424,6 +451,13 @@ pub extern "C" fn BLECleanup() -> i32 {
         EVENT_QUEUE.clear();
         *BLE_MANAGER.lock().unwrap() = None;
         BLE_ADAPTERS.lock().unwrap().clear();
+
+        #[cfg(not(target_os = "android"))]
+        {
+            PERIPHERAL_ADVERTISING.store(false, Ordering::SeqCst);
+            *PERIPHERAL_INSTANCE.lock().unwrap() = None;
+            PERIPHERAL_SERVICES.lock().unwrap().clear();
+        }
 
         unity_log!("BLE plugin cleaned up successfully");
         0
@@ -1291,6 +1325,620 @@ pub unsafe extern "C" fn BLEPollEventJson(out_buffer: *mut u8, max_len: u32) -> 
     .unwrap_or(-1)
 }
 
+// ===== Android JNI Helper =====
+
+/// Initialize Android JNI environment for BLE
+/// Called automatically by Unity C# on Android startup
+///
+/// # Safety
+/// `_jvm` and `_activity` must be valid JavaVM and Activity pointers provided by Android JNI.
+#[ffi_function]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn BLEInitAndroid(
+    _jvm: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+) -> i32 {
+    #[cfg(target_os = "android")]
+    {
+        if _jvm.is_null() {
+            return -1;
+        }
+        let jvm_raw = _jvm as *mut jni::sys::JavaVM;
+        let vm = match jni::JavaVM::from_raw(jvm_raw) {
+            Ok(v) => v,
+            Err(_) => return -1,
+        };
+        *ANDROID_JVM.lock().unwrap() = Some(vm);
+
+        let jvm_guard = ANDROID_JVM.lock().unwrap();
+        let vm_ref = jvm_guard.as_ref().unwrap();
+        let env = match vm_ref.attach_current_thread() {
+            Ok(e) => e,
+            Err(_) => return -1,
+        };
+
+        if !_activity.is_null() {
+            let activity_obj = jni::objects::JObject::from(_activity as jni::sys::jobject);
+            if let Ok(global_ref) = env.new_global_ref(activity_obj) {
+                *ANDROID_APP_CONTEXT.lock().unwrap() = Some(global_ref);
+            }
+        }
+
+        if btleplug::platform::init(&env).is_err() {
+            return -1;
+        }
+    }
+    0
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_dogedada_nativeble_BlePeripheralHelper_onWriteRequest(
+    env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    client: jni::objects::JString,
+    char_uuid: jni::objects::JString,
+    data: jni::sys::jbyteArray,
+) {
+    let client_str: String = env.get_string(client).map(|s| s.into()).unwrap_or_default();
+    let char_str: String = env.get_string(char_uuid).map(|s| s.into()).unwrap_or_default();
+    let bytes = if !data.is_null() {
+        let len = env.get_array_length(data).unwrap_or(0);
+        let mut buf = vec![0i8; len as usize];
+        let _ = env.get_byte_array_region(data, 0, &mut buf);
+        buf.into_iter().map(|b| b as u8).collect()
+    } else {
+        Vec::new()
+    };
+
+    EVENT_QUEUE.push(BleEvent::PeripheralWrite {
+        client: client_str,
+        characteristic: char_str,
+        data: bytes,
+    });
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_dogedada_nativeble_BlePeripheralHelper_onSubscriptionChange(
+    env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    client: jni::objects::JString,
+    char_uuid: jni::objects::JString,
+    subscribed: jni::sys::jboolean,
+) {
+    let client_str: String = env.get_string(client).map(|s| s.into()).unwrap_or_default();
+    let char_str: String = env.get_string(char_uuid).map(|s| s.into()).unwrap_or_default();
+
+    EVENT_QUEUE.push(BleEvent::PeripheralSubscription {
+        client: client_str,
+        characteristic: char_str,
+        subscribed: subscribed != 0,
+    });
+}
+
+// ===== Peripheral (GATT Server) Mode =====
+
+/// Start advertising as a BLE peripheral
+///
+/// # Safety
+/// `name` and `service_uuids_csv` must be null or valid null-terminated C strings.
+#[ffi_function]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn BLEPeripheralStartAdvertising(
+    name: *const std::os::raw::c_char,
+    service_uuids_csv: *const std::os::raw::c_char,
+) -> i32 {
+    #[cfg(target_os = "android")]
+    {
+        catch_unwind(|| {
+            let name_str = if name.is_null() {
+                "UnityBLE"
+            } else {
+                unsafe { CStr::from_ptr(name) }.to_str().unwrap_or("UnityBLE")
+            };
+            let csv_str = if service_uuids_csv.is_null() {
+                ""
+            } else {
+                unsafe { CStr::from_ptr(service_uuids_csv) }.to_str().unwrap_or("")
+            };
+
+            let jvm_guard = ANDROID_JVM.lock().unwrap();
+            let vm = match jvm_guard.as_ref() {
+                Some(v) => v,
+                None => {
+                    unity_log_error!("Android JVM not initialized");
+                    return -1;
+                }
+            };
+            let env = match vm.attach_current_thread() {
+                Ok(e) => e,
+                Err(_) => return -1,
+            };
+
+            let ctx_guard = ANDROID_APP_CONTEXT.lock().unwrap();
+            let ctx = match ctx_guard.as_ref() {
+                Some(c) => c.as_obj(),
+                None => {
+                    unity_log_error!("Android App Context not initialized");
+                    return -1;
+                }
+            };
+
+            let helper_class = match env.find_class("com/dogedada/nativeble/BlePeripheralHelper") {
+                Ok(c) => c,
+                Err(e) => {
+                    unity_log_error!("BlePeripheralHelper not found: {:?}", e);
+                    return -1;
+                }
+            };
+
+            let name_jstr = match env.new_string(name_str) {
+                Ok(s) => s,
+                Err(_) => return -1,
+            };
+            let csv_jstr = match env.new_string(csv_str) {
+                Ok(s) => s,
+                Err(_) => return -1,
+            };
+
+            let res = env.call_static_method(
+                helper_class,
+                "startAdvertising",
+                "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)I",
+                &[
+                    jni::objects::JValue::Object(ctx),
+                    jni::objects::JValue::Object(name_jstr.into()),
+                    jni::objects::JValue::Object(csv_jstr.into()),
+                ],
+            );
+
+            match res {
+                Ok(v) => {
+                    let code = v.i().unwrap_or(-1);
+                    if code == 0 {
+                        PERIPHERAL_ADVERTISING.store(true, Ordering::SeqCst);
+                    }
+                    code
+                }
+                Err(e) => {
+                    unity_log_error!("startAdvertising JNI call failed: {:?}", e);
+                    -1
+                }
+            }
+        })
+        .unwrap_or(-1)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        catch_unwind(|| {
+            let name_str = if name.is_null() {
+                "UnityBLE"
+            } else {
+                unsafe { CStr::from_ptr(name) }.to_str().unwrap_or("UnityBLE")
+            };
+
+            let mut uuids = Vec::new();
+            if !service_uuids_csv.is_null() {
+                let csv = unsafe { CStr::from_ptr(service_uuids_csv) }.to_str().unwrap_or("");
+                for part in csv.split(',') {
+                    let trimmed = part.trim();
+                    if !trimmed.is_empty() {
+                        if let Some(u) = parse_ble_uuid_str(trimmed) {
+                            uuids.push(u);
+                        }
+                    }
+                }
+            }
+
+            let rt_guard = TOKIO_RUNTIME.lock().unwrap();
+            let rt = match rt_guard.as_ref() {
+                Some(rt) => rt,
+                None => {
+                    unity_log_error!("BLE subsystem not initialized. Call BLEInit first.");
+                    return -1;
+                }
+            };
+
+            let mut periph_guard = PERIPHERAL_INSTANCE.lock().unwrap();
+            if periph_guard.is_none() {
+                let (sender_tx, mut sender_rx) = tokio::sync::mpsc::channel(256);
+                let p = match rt.block_on(async { ble_peripheral_rust::Peripheral::new(sender_tx).await }) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        unity_log_error!("Failed to create peripheral: {:?}", e);
+                        return -1;
+                    }
+                };
+
+                // Spawn background event listener for peripheral
+                rt.spawn(async move {
+                    while let Some(ev) = sender_rx.recv().await {
+                        match ev {
+                            ble_peripheral_rust::gatt::peripheral_event::PeripheralEvent::WriteRequest {
+                                request,
+                                value,
+                                responder,
+                                ..
+                            } => {
+                                EVENT_QUEUE.push(BleEvent::PeripheralWrite {
+                                    client: request.client,
+                                    characteristic: request.characteristic.to_string(),
+                                    data: value,
+                                });
+                                let _ = responder.send(
+                                    ble_peripheral_rust::gatt::peripheral_event::WriteRequestResponse {
+                                        response: ble_peripheral_rust::gatt::peripheral_event::RequestResponse::Success,
+                                    },
+                                );
+                            }
+                            ble_peripheral_rust::gatt::peripheral_event::PeripheralEvent::CharacteristicSubscriptionUpdate {
+                                request,
+                                subscribed,
+                            } => {
+                                EVENT_QUEUE.push(BleEvent::PeripheralSubscription {
+                                    client: request.client,
+                                    characteristic: request.characteristic.to_string(),
+                                    subscribed,
+                                });
+                            }
+                            ble_peripheral_rust::gatt::peripheral_event::PeripheralEvent::ReadRequest {
+                                responder,
+                                ..
+                            } => {
+                                let _ = responder.send(
+                                    ble_peripheral_rust::gatt::peripheral_event::ReadRequestResponse {
+                                        value: Vec::new(),
+                                        response: ble_peripheral_rust::gatt::peripheral_event::RequestResponse::Success,
+                                    },
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                });
+
+                *periph_guard = Some(p);
+            }
+
+            if let Some(p) = periph_guard.as_mut() {
+                let services_lock = PERIPHERAL_SERVICES.lock().unwrap();
+                for s in services_lock.iter() {
+                    let _ = rt.block_on(async { p.add_service(s).await });
+                }
+
+                let res = rt.block_on(async {
+                    p.start_advertising(name_str, &uuids).await
+                });
+                match res {
+                    Ok(_) => {
+                        PERIPHERAL_ADVERTISING.store(true, Ordering::SeqCst);
+                        unity_log!("Peripheral advertising started: '{}'", name_str);
+                        0
+                    }
+                    Err(e) => {
+                        unity_log_error!("Failed to start peripheral advertising: {:?}", e);
+                        -1
+                    }
+                }
+            } else {
+                -1
+            }
+        })
+        .unwrap_or(-1)
+    }
+}
+
+/// Stop peripheral advertising
+#[ffi_function]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn BLEPeripheralStopAdvertising() -> i32 {
+    #[cfg(target_os = "android")]
+    {
+        catch_unwind(|| {
+            let jvm_guard = ANDROID_JVM.lock().unwrap();
+            if let Some(vm) = jvm_guard.as_ref() {
+                if let Ok(env) = vm.attach_current_thread() {
+                    if let Ok(helper_class) = env.find_class("com/dogedada/nativeble/BlePeripheralHelper") {
+                        let _ = env.call_static_method(helper_class, "stopAdvertising", "()I", &[]);
+                    }
+                }
+            }
+            PERIPHERAL_ADVERTISING.store(false, Ordering::SeqCst);
+            0
+        })
+        .unwrap_or(-1)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        catch_unwind(|| {
+            let rt_guard = TOKIO_RUNTIME.lock().unwrap();
+            if let Some(rt) = rt_guard.as_ref() {
+                let mut periph_guard = PERIPHERAL_INSTANCE.lock().unwrap();
+                if let Some(p) = periph_guard.as_mut() {
+                    let _ = rt.block_on(async { p.stop_advertising().await });
+                }
+            }
+            PERIPHERAL_ADVERTISING.store(false, Ordering::SeqCst);
+            unity_log!("Peripheral advertising stopped");
+            0
+        })
+        .unwrap_or(-1)
+    }
+}
+
+/// Query whether peripheral is advertising
+#[ffi_function]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn BLEPeripheralIsAdvertising() -> i32 {
+    if PERIPHERAL_ADVERTISING.load(Ordering::SeqCst) {
+        1
+    } else {
+        0
+    }
+}
+
+/// Define a GATT Service on the peripheral
+#[ffi_function]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn BLEPeripheralAddService(service_uuid: BLEUuid, primary: i32) -> i32 {
+    #[cfg(target_os = "android")]
+    {
+        catch_unwind(|| {
+            let u: Uuid = service_uuid.into();
+            let u_str = u.to_string();
+
+            let jvm_guard = ANDROID_JVM.lock().unwrap();
+            let vm = match jvm_guard.as_ref() {
+                Some(v) => v,
+                None => return -1,
+            };
+            let env = match vm.attach_current_thread() {
+                Ok(e) => e,
+                Err(_) => return -1,
+            };
+
+            let helper_class = match env.find_class("com/dogedada/nativeble/BlePeripheralHelper") {
+                Ok(c) => c,
+                Err(_) => return -1,
+            };
+
+            let u_jstr = match env.new_string(&u_str) {
+                Ok(s) => s,
+                Err(_) => return -1,
+            };
+
+            let res = env.call_static_method(
+                helper_class,
+                "addService",
+                "(Ljava/lang/String;Z)I",
+                &[
+                    jni::objects::JValue::Object(u_jstr.into()),
+                    jni::objects::JValue::Bool((primary != 0) as u8),
+                ],
+            );
+            res.map(|v| v.i().unwrap_or(-1)).unwrap_or(-1)
+        })
+        .unwrap_or(-1)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        catch_unwind(|| {
+            let u: Uuid = service_uuid.into();
+            let mut services = PERIPHERAL_SERVICES.lock().unwrap();
+            if !services.iter().any(|s| s.uuid == u) {
+                services.push(ble_peripheral_rust::gatt::service::Service {
+                    uuid: u,
+                    primary: primary != 0,
+                    characteristics: Vec::new(),
+                });
+            }
+            0
+        })
+        .unwrap_or(-1)
+    }
+}
+
+/// Define a GATT Characteristic on a peripheral service
+#[ffi_function]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn BLEPeripheralAddCharacteristic(
+    service_uuid: BLEUuid,
+    char_uuid: BLEUuid,
+    can_read: i32,
+    can_write: i32,
+    can_notify: i32,
+) -> i32 {
+    #[cfg(target_os = "android")]
+    {
+        catch_unwind(|| {
+            let s_uuid: Uuid = service_uuid.into();
+            let c_uuid: Uuid = char_uuid.into();
+
+            let jvm_guard = ANDROID_JVM.lock().unwrap();
+            let vm = match jvm_guard.as_ref() {
+                Some(v) => v,
+                None => return -1,
+            };
+            let env = match vm.attach_current_thread() {
+                Ok(e) => e,
+                Err(_) => return -1,
+            };
+
+            let helper_class = match env.find_class("com/dogedada/nativeble/BlePeripheralHelper") {
+                Ok(c) => c,
+                Err(_) => return -1,
+            };
+
+            let s_jstr = match env.new_string(s_uuid.to_string()) {
+                Ok(s) => s,
+                Err(_) => return -1,
+            };
+            let c_jstr = match env.new_string(c_uuid.to_string()) {
+                Ok(s) => s,
+                Err(_) => return -1,
+            };
+
+            let res = env.call_static_method(
+                helper_class,
+                "addCharacteristic",
+                "(Ljava/lang/String;Ljava/lang/String;ZZZ)I",
+                &[
+                    jni::objects::JValue::Object(s_jstr.into()),
+                    jni::objects::JValue::Object(c_jstr.into()),
+                    jni::objects::JValue::Bool((can_read != 0) as u8),
+                    jni::objects::JValue::Bool((can_write != 0) as u8),
+                    jni::objects::JValue::Bool((can_notify != 0) as u8),
+                ],
+            );
+            res.map(|v| v.i().unwrap_or(-1)).unwrap_or(-1)
+        })
+        .unwrap_or(-1)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        catch_unwind(|| {
+            let s_uuid: Uuid = service_uuid.into();
+            let c_uuid: Uuid = char_uuid.into();
+
+            use ble_peripheral_rust::gatt::properties::{AttributePermission, CharacteristicProperty};
+
+            let mut props = Vec::new();
+            let mut perms = Vec::new();
+
+            if can_read != 0 {
+                props.push(CharacteristicProperty::Read);
+                perms.push(AttributePermission::Readable);
+            }
+            if can_write != 0 {
+                props.push(CharacteristicProperty::Write);
+                perms.push(AttributePermission::Writeable);
+            }
+            if can_notify != 0 {
+                props.push(CharacteristicProperty::Notify);
+            }
+
+            let mut services = PERIPHERAL_SERVICES.lock().unwrap();
+            let service = match services.iter_mut().find(|s| s.uuid == s_uuid) {
+                Some(s) => s,
+                None => {
+                    services.push(ble_peripheral_rust::gatt::service::Service {
+                        uuid: s_uuid,
+                        primary: true,
+                        characteristics: Vec::new(),
+                    });
+                    services.last_mut().unwrap()
+                }
+            };
+
+            service.characteristics.push(ble_peripheral_rust::gatt::characteristic::Characteristic {
+                uuid: c_uuid,
+                properties: props,
+                permissions: perms,
+                value: None,
+                descriptors: Vec::new(),
+            });
+
+            0
+        })
+        .unwrap_or(-1)
+    }
+}
+
+/// Update characteristic value and notify subscribed centrals
+///
+/// # Safety
+/// If `len > 0`, `data` must point to a valid readable byte buffer of at least `len` bytes.
+#[ffi_function]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn BLEPeripheralUpdateCharacteristic(
+    char_uuid: BLEUuid,
+    data: *const u8,
+    len: u32,
+) -> i32 {
+    #[cfg(target_os = "android")]
+    {
+        catch_unwind(|| {
+            let c_uuid: Uuid = char_uuid.into();
+            let bytes = if data.is_null() || len == 0 {
+                Vec::new()
+            } else {
+                unsafe { std::slice::from_raw_parts(data, len as usize) }.to_vec()
+            };
+
+            let jvm_guard = ANDROID_JVM.lock().unwrap();
+            let vm = match jvm_guard.as_ref() {
+                Some(v) => v,
+                None => return -1,
+            };
+            let env = match vm.attach_current_thread() {
+                Ok(e) => e,
+                Err(_) => return -1,
+            };
+
+            let helper_class = match env.find_class("com/dogedada/nativeble/BlePeripheralHelper") {
+                Ok(c) => c,
+                Err(_) => return -1,
+            };
+
+            let c_jstr = match env.new_string(c_uuid.to_string()) {
+                Ok(s) => s,
+                Err(_) => return -1,
+            };
+
+            let byte_arr = match env.byte_array_from_slice(&bytes) {
+                Ok(a) => a,
+                Err(_) => return -1,
+            };
+
+            let res = env.call_static_method(
+                helper_class,
+                "updateCharacteristic",
+                "(Ljava/lang/String;[B)I",
+                &[
+                    jni::objects::JValue::Object(c_jstr.into()),
+                    jni::objects::JValue::Object(byte_arr.into()),
+                ],
+            );
+            res.map(|v| v.i().unwrap_or(-1)).unwrap_or(-1)
+        })
+        .unwrap_or(-1)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        catch_unwind(|| {
+            let c_uuid: Uuid = char_uuid.into();
+            let bytes = if data.is_null() || len == 0 {
+                Vec::new()
+            } else {
+                unsafe { std::slice::from_raw_parts(data, len as usize) }.to_vec()
+            };
+
+            let rt_guard = TOKIO_RUNTIME.lock().unwrap();
+            if let Some(rt) = rt_guard.as_ref() {
+                let mut periph_guard = PERIPHERAL_INSTANCE.lock().unwrap();
+                if let Some(p) = periph_guard.as_mut() {
+                    let res = rt.block_on(async {
+                        p.update_characteristic(c_uuid, bytes).await
+                    });
+                    if res.is_ok() {
+                        return 0;
+                    }
+                }
+            }
+            -1
+        })
+        .unwrap_or(-1)
+    }
+}
+
 /// Test logging to Unity console
 #[ffi_function]
 #[no_mangle]
@@ -1326,6 +1974,13 @@ pub fn ffi_inventory() -> interoptopus::Inventory {
         .register(interoptopus::function!(BLEReadDescriptor))
         .register(interoptopus::function!(BLEWriteDescriptor))
         .register(interoptopus::function!(BLEPollEventJson))
+        .register(interoptopus::function!(BLEInitAndroid))
+        .register(interoptopus::function!(BLEPeripheralStartAdvertising))
+        .register(interoptopus::function!(BLEPeripheralStopAdvertising))
+        .register(interoptopus::function!(BLEPeripheralIsAdvertising))
+        .register(interoptopus::function!(BLEPeripheralAddService))
+        .register(interoptopus::function!(BLEPeripheralAddCharacteristic))
+        .register(interoptopus::function!(BLEPeripheralUpdateCharacteristic))
         .register(interoptopus::function!(TestLogging))
         .inventory()
 }

@@ -16,7 +16,7 @@ Provides thread-safe, non-blocking BLE operations with a native event queue, JSO
 | **iOS** (`arm64`) | Apple CoreBluetooth | **Supported** | `unity_native_ble.framework` | Compiles as static library. Requires linking `CoreBluetooth.framework` in Xcode. |
 | **Windows** (10 / 11 64-bit) | Windows.Devices.Bluetooth (WinRT) | **Supported** | `unity_native_ble.dll` | Requires Windows 10 (Build 15063+) or later. |
 | **Linux** (x86_64) | BlueZ (via D-Bus) | **Supported** | `libunity_native_ble.so` | Requires system `libdbus-1` and running `bluetoothd`. |
-| **Android** (arm64, armv7) | Android BluetoothGatt | **Incomplete** | `libunity_native_ble.so` | `btleplug` supports Android, but requires a Java/Kotlin JNI bridge (`init(&jvm, activity)`) in Unity's `UnityPlayerActivity`. |
+| **Android** (arm64, armv7) | Android BluetoothGatt & LeAdvertiser | **Supported** | `libunity_native_ble.so` + `unity_native_ble_android.aar` | Central & Peripheral (GATT Server + Advertising). Clean-room JNI companion AAR with auto-initialization. Zero custom Java/Activity required. |
 | **OpenHarmony (OHOS)** | OHOS Native BLE C API | **Roadmap / Planned** | `libunity_native_ble.so` | Targets `aarch64-unknown-linux-ohos`. Requires OHOS NDK C binding. See [OpenHarmony Support](#openharmony-ohos-support). |
 | **WebGL / Consoles** | N/A | **Not Supported** | N/A | Browser sandboxing and console OS restrictions block native BLE. |
 
@@ -27,6 +27,20 @@ Provides thread-safe, non-blocking BLE operations with a native event queue, JSO
 - **Dual-Layer API**:
   - **High-Level C# API**: `BluetoothManager` MonoBehaviour with C# events (`OnDeviceDiscovered`, `OnConnected`, `OnNotificationReceived`).
   - **Low-Level Native FFI**: Direct P/Invoke bindings via `NativeBLE`.
+
+---
+
+### Why Not SimpleBLE / SimpleRsBLE?
+
+While [SimpleBLE](https://github.com/simpleble/simpleble) / `simplersble` offers an established C++ BLE stack, it adopted the **Business Source License 1.1 (BUSL-1.1)**:
+- **Commercial Restrictions**: BUSL-1.1 forbids commercial and revenue-generating use without purchasing a commercial license from *The California Open Source Company LLC*.
+- **Copyleft Transition**: Releases convert to **GPL-3.0** after four years, which is incompatible with proprietary Unity games, console NDAs, and App Store distributions.
+- **OpenUPM Ineligible**: OpenUPM strictly requires OSI-approved open source licenses (such as MIT or Apache-2.0). BUSL-1.1 packages are rejected.
+
+By pairing **`btleplug`** (Central) with **`ble-peripheral-rust`** (Peripheral), this plugin remains **100% MIT / Apache-2.0**:
+- Completely free for commercial, indie, and proprietary Unity games with zero license fees.
+- 100% compliant with OpenUPM and Unity Package Manager standards.
+- Pure Rust cross-compilation without heavy CMake / C++ toolchain dependencies.
 
 ---
 
@@ -151,6 +165,43 @@ public class BleExample : MonoBehaviour
 }
 ```
 
+### Peripheral Mode (Acting as a BLE Device / GATT Server)
+
+```csharp
+using UnityEngine;
+using UnityNativeBLE;
+
+public class BlePeripheralExample : MonoBehaviour
+{
+    private void Start()
+    {
+        var ble = BluetoothManager.Instance;
+        ble.Initialize();
+
+        // 1. Define GATT service and characteristic
+        string serviceUuid = "12345678-1234-5678-1234-56789abcdef0";
+        string charUuid    = "12345678-1234-5678-1234-56789abcdef1";
+
+        ble.AddPeripheralService(serviceUuid, primary: true);
+        ble.AddPeripheralCharacteristic(serviceUuid, charUuid, canRead: true, canWrite: true, canNotify: true);
+
+        // 2. Listen for writes and subscriptions from Centrals
+        ble.OnPeripheralWriteReceived += (clientAddress, uuid, data) =>
+        {
+            Debug.Log($"[BLE Peripheral] Write from {clientAddress} on {uuid}: {data.Length} bytes");
+        };
+
+        ble.OnPeripheralSubscriptionChanged += (clientAddress, uuid, subscribed) =>
+        {
+            Debug.Log($"[BLE Peripheral] Central {clientAddress} subscribed={subscribed} on {uuid}");
+        };
+
+        // 3. Start advertising
+        ble.StartAdvertising("My BLE Device", serviceUuid);
+    }
+}
+```
+
 ---
 
 ## Building Native Binaries
@@ -186,8 +237,14 @@ Runtime/
 │   │   └── unity_native_ble.framework
 │   ├── Windows/
 │   │   └── unity_native_ble.dll
-│   └── Linux/
-│       └── libunity_native_ble.so
+│   ├── Linux/
+│   │   └── libunity_native_ble.so
+│   └── Android/
+│       ├── arm64-v8a/
+│       │   └── libunity_native_ble.so
+│       ├── armeabi-v7a/
+│       │   └── libunity_native_ble.so
+│       └── unity_native_ble_android.aar
 ├── BluetoothManager.cs
 ├── UnityNativeBLE.generated.cs
 └── com.dogedada.native-ble.asmdef
@@ -270,6 +327,17 @@ int BLEReadDescriptor(const char* device_id, BLEUuid characteristic_uuid,
                       BLEUuid descriptor_uuid, uint8_t* data, uint32_t max_len);
 int BLEWriteDescriptor(const char* device_id, BLEUuid characteristic_uuid,
                        BLEUuid descriptor_uuid, const uint8_t* data, uint32_t len);
+```
+
+### Peripheral Mode (GATT Server & Advertising)
+```c
+int BLEPeripheralStartAdvertising(const char* name, const char* service_uuids_csv);
+int BLEPeripheralStopAdvertising();
+int BLEPeripheralIsAdvertising();
+int BLEPeripheralAddService(BLEUuid service_uuid, int primary);
+int BLEPeripheralAddCharacteristic(BLEUuid service_uuid, BLEUuid char_uuid,
+                                  int can_read, int can_write, int can_notify);
+int BLEPeripheralUpdateCharacteristic(BLEUuid char_uuid, const uint8_t* data, uint32_t len);
 ```
 
 ### Native Event Queue

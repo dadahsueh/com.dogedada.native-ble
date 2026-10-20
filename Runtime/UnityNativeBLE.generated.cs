@@ -135,6 +135,44 @@ namespace UnityNativeBLE
         [DllImport(NativeLib, CallingConvention = CallingConvention.Cdecl, EntryPoint = "BLEPollEventJson")]
         public static extern int BLEPollEventJson([Out] byte[] out_buffer, uint max_len);
 
+        /// Initialize Android JNI environment for BLE
+        /// Called automatically by Unity C# on Android startup
+        ///
+        /// # Safety
+        /// `_jvm` and `_activity` must be valid JavaVM and Activity pointers provided by Android JNI.
+        [DllImport(NativeLib, CallingConvention = CallingConvention.Cdecl, EntryPoint = "BLEInitAndroid")]
+        public static extern int BLEInitAndroid(IntPtr jvm, IntPtr activity);
+
+        /// Start advertising as a BLE peripheral
+        ///
+        /// # Safety
+        /// `name` and `service_uuids_csv` must be null or valid null-terminated C strings.
+        [DllImport(NativeLib, CallingConvention = CallingConvention.Cdecl, EntryPoint = "BLEPeripheralStartAdvertising")]
+        public static extern int BLEPeripheralStartAdvertising([MarshalAs(UnmanagedType.LPStr)] string name, [MarshalAs(UnmanagedType.LPStr)] string service_uuids_csv);
+
+        /// Stop peripheral advertising
+        [DllImport(NativeLib, CallingConvention = CallingConvention.Cdecl, EntryPoint = "BLEPeripheralStopAdvertising")]
+        public static extern int BLEPeripheralStopAdvertising();
+
+        /// Query whether peripheral is advertising
+        [DllImport(NativeLib, CallingConvention = CallingConvention.Cdecl, EntryPoint = "BLEPeripheralIsAdvertising")]
+        public static extern int BLEPeripheralIsAdvertising();
+
+        /// Define a GATT Service on the peripheral
+        [DllImport(NativeLib, CallingConvention = CallingConvention.Cdecl, EntryPoint = "BLEPeripheralAddService")]
+        public static extern int BLEPeripheralAddService(BLEUuid service_uuid, int primary);
+
+        /// Define a GATT Characteristic on a peripheral service
+        [DllImport(NativeLib, CallingConvention = CallingConvention.Cdecl, EntryPoint = "BLEPeripheralAddCharacteristic")]
+        public static extern int BLEPeripheralAddCharacteristic(BLEUuid service_uuid, BLEUuid char_uuid, int can_read, int can_write, int can_notify);
+
+        /// Update characteristic value and notify subscribed centrals
+        ///
+        /// # Safety
+        /// If `len > 0`, `data` must point to a valid readable byte buffer of at least `len` bytes.
+        [DllImport(NativeLib, CallingConvention = CallingConvention.Cdecl, EntryPoint = "BLEPeripheralUpdateCharacteristic")]
+        public static extern int BLEPeripheralUpdateCharacteristic(BLEUuid char_uuid, [In] byte[] data, uint len);
+
         /// Test logging to Unity console
         [DllImport(NativeLib, CallingConvention = CallingConvention.Cdecl, EntryPoint = "TestLogging")]
         public static extern int TestLogging();
