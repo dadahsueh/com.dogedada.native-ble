@@ -1,0 +1,21 @@
+{
+  "name": "com.dogedada.native-ble",
+  "version": "0.3.0",
+  "displayName": "Unity Native BLE",
+  "description": "High-performance cross-platform native Bluetooth Low Energy (BLE) plugin for Unity built with Rust.",
+  "unity": "2021.3",
+  "author": {
+    "name": "Dada Hsueh",
+    "email": "dadahsueh@live.com"
+  },
+  "keywords": [
+    "bluetooth",
+    "ble",
+    "native",
+    "rust",
+    "iot",
+    "gatt"
+  ],
+  "license": "MIT",
+  "dependencies": {}
+}
